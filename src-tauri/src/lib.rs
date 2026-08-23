@@ -31,7 +31,7 @@ pub struct AppConfig {
     pub font_family: String,
     pub font_size: u32,
     pub exclude_apps: Vec<String>, // 不记录这些程序里的复制（exe 名，小写）
-    pub max_items: i64,          // 最多保留条数（不含置顶）
+    pub max_items: i64,          // 最多保留条数（不含置顶），0 = 无限制
     pub retention_value: u32,    // 数据保留时长数值，0 = 永久保留
     pub retention_unit: String,  // "hours" | "days" | "months" | "years"
 }
@@ -47,7 +47,7 @@ impl Default for AppConfig {
             font_family: "Segoe UI, Microsoft YaHei, system-ui, sans-serif".into(),
             font_size: 14,
             exclude_apps: vec![],
-            max_items: 500,
+            max_items: 0,
             retention_value: 0,
             retention_unit: "days".into(),
         }

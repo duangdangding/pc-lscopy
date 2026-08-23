@@ -66,8 +66,8 @@
       <div class="tab-panel" id="tab-rules" hidden>
         <section class="card">
           <h2>记录规则</h2>
-          <label class="field">最多保留条数（超出后自动删除最旧的非置顶记录）
-            <input id="max-items" type="number" min="10" max="100000" />
+          <label class="field">最多保留条数（0 = 无限制；超出后自动删除最旧的非置顶记录）
+            <input id="max-items" type="number" min="0" max="100000" />
           </label>
           <label class="field">数据保留时长（0 = 永久保留，到期自动删除，置顶不受影响）
             <div class="row inline-row">

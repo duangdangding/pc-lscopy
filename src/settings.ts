@@ -177,7 +177,7 @@ async function refreshDbInfo() {
     <div>文件位置：<code>${info.path}</code></div>
     <div>文件大小：${fmtSize(info.file_size)}</div>
     <div>总记录数：${info.total} 条（文字 ${info.text_count} · 图片 ${info.image_count} · 置顶 ${info.pinned_count}）</div>
-    <div>保留上限：${info.max_items} 条（不含置顶）</div>
+    <div>保留上限：${info.max_items > 0 ? `${info.max_items} 条（不含置顶）` : "无限制"}</div>
   `;
 }
 $("#db-info-refresh").addEventListener("click", refreshDbInfo);
@@ -196,7 +196,7 @@ $("#btn-save").addEventListener("click", async () => {
       .split(/\r?\n/)
       .map((s) => s.trim())
       .filter(Boolean),
-    max_items: Math.max(10, Number(maxItemsEl.value) || 500),
+    max_items: Math.max(0, Number(maxItemsEl.value) || 0),
     retention_value: Math.max(0, Number(retentionValueEl.value) || 0),
     retention_unit: retentionUnitEl.value,
   };
