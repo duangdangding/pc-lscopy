@@ -116,7 +116,6 @@ struct DbInfo {
 
 struct AppState {
     db: Mutex<Connection>,
-    last_hash: Mutex<u64>,
     config: Mutex<AppConfig>,
     config_file: PathBuf,
 }
@@ -159,9 +158,11 @@ fn init_db(path: &PathBuf) -> Result<Connection, String> {
             width INTEGER,
             height INTEGER,
             pinned INTEGER NOT NULL DEFAULT 0,
+            hash INTEGER,
             created_at INTEGER NOT NULL
         );
-        CREATE INDEX IF NOT EXISTS idx_clips_time ON clips(created_at DESC);",
+        CREATE INDEX IF NOT EXISTS idx_clips_time ON clips(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_clips_hash ON clips(hash);",
     )
     .map_err(|e| e.to_string())?;
     // 旧版本库迁移：补 pinned 列
@@ -169,7 +170,68 @@ fn init_db(path: &PathBuf) -> Result<Connection, String> {
         conn.execute_batch("ALTER TABLE clips ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
             .map_err(|e| e.to_string())?;
     }
+    // 旧版本库迁移：补 hash 列并回填已有数据
+    if conn.prepare("SELECT hash FROM clips LIMIT 1").is_err() {
+        conn.execute_batch("ALTER TABLE clips ADD COLUMN hash INTEGER")
+            .map_err(|e| e.to_string())?;
+        backfill_hashes(&conn);
+    }
     Ok(conn)
+}
+
+// 为旧数据回填内容哈希（用于去重）
+fn backfill_hashes(conn: &Connection) {
+    let rows: Vec<(i64, Option<String>, Option<Vec<u8>>)> = conn
+        .prepare("SELECT id, content, image FROM clips WHERE hash IS NULL")
+        .and_then(|mut s| {
+            let mapped = s.query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?;
+            Ok(mapped.filter_map(|r| r.ok()).collect())
+        })
+        .unwrap_or_default();
+    for (id, content, image) in rows {
+        let h = match (&content, &image) {
+            (Some(t), _) => hash_bytes(t.as_bytes()),
+            (None, Some(b)) => hash_bytes(b),
+            _ => continue,
+        };
+        let _ = conn.execute(
+            "UPDATE clips SET hash = ?1 WHERE id = ?2",
+            params![h as i64, id],
+        );
+    }
+}
+
+// 写入记录：相同内容已存在时仅把时间更新为现在（移到最前），不重复插入
+// 返回 true 表示列表需要刷新
+fn store_clip(
+    db: &Connection,
+    kind: &str,
+    content: Option<&str>,
+    image: Option<&[u8]>,
+    width: Option<u32>,
+    height: Option<u32>,
+    hash: u64,
+) -> bool {
+    let h64 = hash as i64;
+    if let Ok(id) = db.query_row(
+        "SELECT id FROM clips WHERE hash = ?1 ORDER BY created_at DESC LIMIT 1",
+        params![h64],
+        |r| r.get::<_, i64>(0),
+    ) {
+        let _ = db.execute(
+            "UPDATE clips SET created_at = ?2 WHERE id = ?1",
+            params![id, now_secs()],
+        );
+        return true;
+    }
+    db.execute(
+        "INSERT INTO clips(kind, content, image, width, height, hash, created_at)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![kind, content, image, width, height, h64, now_secs()],
+    )
+    .is_ok()
 }
 
 // 超出上限时删除最旧的非置顶记录
@@ -324,19 +386,13 @@ fn start_watcher(app: AppHandle) {
                 continue;
             }
 
-            // 优先文字，其次图片
+            // 优先文字，其次图片，最后文件（相同内容走 store_clip 去重，只移到最前）
             if let Ok(text) = cb.get_text() {
                 let text = text.trim_end_matches('\0').to_string();
                 if !text.is_empty() {
                     let h = hash_bytes(text.as_bytes());
-                    let mut last = state.last_hash.lock().unwrap();
-                    if *last != h {
-                        *last = h;
-                        let db = state.db.lock().unwrap();
-                        let _ = db.execute(
-                            "INSERT INTO clips(kind, content, created_at) VALUES('text', ?1, ?2)",
-                            params![text, now_secs()],
-                        );
+                    let db = state.db.lock().unwrap();
+                    if store_clip(&db, "text", Some(&text), None, None, None, h) {
                         prune(&db, max_items);
                         let _ = app.emit("clip-added", ());
                     }
@@ -347,14 +403,8 @@ fn start_watcher(app: AppHandle) {
                 if let Some((png, w, hgt)) = png_from_arboard(&img) {
                     if png.len() <= 20 * 1024 * 1024 {
                         let h = hash_bytes(&png);
-                        let mut last = state.last_hash.lock().unwrap();
-                        if *last != h {
-                            *last = h;
-                            let db = state.db.lock().unwrap();
-                            let _ = db.execute(
-                                "INSERT INTO clips(kind, image, width, height, created_at) VALUES('image', ?1, ?2, ?3, ?4)",
-                                params![png, w, hgt, now_secs()],
-                            );
+                        let db = state.db.lock().unwrap();
+                        if store_clip(&db, "image", None, Some(&png), Some(w), Some(hgt), h) {
                             prune(&db, max_items);
                             let _ = app.emit("clip-added", ());
                         }
@@ -366,14 +416,8 @@ fn start_watcher(app: AppHandle) {
             if let Some(files) = clipboard_files() {
                 let joined = files.join("\n");
                 let h = hash_bytes(joined.as_bytes());
-                let mut last = state.last_hash.lock().unwrap();
-                if *last != h {
-                    *last = h;
-                    let db = state.db.lock().unwrap();
-                    let _ = db.execute(
-                        "INSERT INTO clips(kind, content, created_at) VALUES('file', ?1, ?2)",
-                        params![joined, now_secs()],
-                    );
+                let db = state.db.lock().unwrap();
+                if store_clip(&db, "file", Some(&joined), None, None, None, h) {
                     prune(&db, max_items);
                     let _ = app.emit("clip-added", ());
                 }
@@ -390,7 +434,7 @@ fn list_clips(state: State<AppState>, keyword: Option<String>) -> Vec<Clip> {
     let (sql, kw): (&str, Option<String>) = match &keyword {
         Some(k) if !k.trim().is_empty() => (
             "SELECT id, kind, content, image, width, height, pinned, created_at FROM clips
-             WHERE (kind='image' OR content LIKE ?1)
+             WHERE content LIKE ?1
              ORDER BY pinned DESC, created_at DESC LIMIT 500",
             Some(format!("%{}%", k.trim())),
         ),
@@ -502,11 +546,9 @@ fn set_clipboard_by_id(state: &AppState, id: i64) -> Result<(), String> {
             bytes: dynimg.into_raw().into(),
         })
         .map_err(|e| e.to_string())?;
-        *state.last_hash.lock().unwrap() = hash_bytes(&png);
     } else {
         let text = content.unwrap_or_default();
         cb.set_text(text.clone()).map_err(|e| e.to_string())?;
-        *state.last_hash.lock().unwrap() = hash_bytes(text.as_bytes());
     }
     Ok(())
 }
@@ -747,10 +789,26 @@ fn import_clips(state: State<AppState>, path: String) -> Result<i64, String> {
             Some(b64) => B64.decode(b64).ok(),
             None => None,
         };
+        let h = match (&c.content, &img) {
+            (Some(t), _) => hash_bytes(t.as_bytes()),
+            (None, Some(b)) => hash_bytes(b),
+            _ => 0,
+        };
+        // 相同内容已存在则跳过，避免导入产生重复
+        let exists = db
+            .query_row(
+                "SELECT 1 FROM clips WHERE hash = ?1 LIMIT 1",
+                params![h as i64],
+                |_| Ok(()),
+            )
+            .is_ok();
+        if exists {
+            continue;
+        }
         let r = db.execute(
-            "INSERT INTO clips(kind, content, image, width, height, pinned, created_at)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![c.kind, c.content, img, c.width, c.height, c.pinned as i64, c.created_at],
+            "INSERT INTO clips(kind, content, image, width, height, pinned, hash, created_at)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![c.kind, c.content, img, c.width, c.height, c.pinned as i64, h as i64, c.created_at],
         );
         if r.is_ok() {
             count += 1;
@@ -996,7 +1054,6 @@ pub fn run() {
             let db = init_db(&effective_db_path(&config))?;
             app.manage(AppState {
                 db: Mutex::new(db),
-                last_hash: Mutex::new(0),
                 config: Mutex::new(config.clone()),
                 config_file,
             });
