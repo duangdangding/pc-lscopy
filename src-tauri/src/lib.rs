@@ -118,6 +118,8 @@ struct AppState {
     db: Mutex<Connection>,
     config: Mutex<AppConfig>,
     config_file: PathBuf,
+    // 删除记录时忽略当前剪贴板内容，防止监听线程把刚删掉的内容再加回来
+    ignored_hash: Mutex<Option<u64>>,
 }
 
 fn now_secs() -> i64 {
@@ -392,6 +394,9 @@ fn start_watcher(app: AppHandle) {
                 let text = text.trim_end_matches('\0').to_string();
                 if !text.is_empty() {
                     let h = hash_bytes(text.as_bytes());
+                    if should_skip(&state, h) {
+                        continue;
+                    }
                     let db = state.db.lock().unwrap();
                     if store_clip(&db, "text", Some(&text), None, None, None, h) {
                         prune(&db, max_items);
@@ -404,6 +409,9 @@ fn start_watcher(app: AppHandle) {
                 if let Some((png, w, hgt)) = png_from_arboard(&img) {
                     if png.len() <= 20 * 1024 * 1024 {
                         let h = hash_bytes(&png);
+                        if should_skip(&state, h) {
+                            continue;
+                        }
                         let db = state.db.lock().unwrap();
                         if store_clip(&db, "image", None, Some(&png), Some(w), Some(hgt), h) {
                             prune(&db, max_items);
@@ -417,6 +425,9 @@ fn start_watcher(app: AppHandle) {
             if let Some(files) = clipboard_files() {
                 let joined = files.join("\n");
                 let h = hash_bytes(joined.as_bytes());
+                if should_skip(&state, h) {
+                    continue;
+                }
                 let db = state.db.lock().unwrap();
                 if store_clip(&db, "file", Some(&joined), None, None, None, h) {
                     prune(&db, max_items);
@@ -425,6 +436,39 @@ fn start_watcher(app: AppHandle) {
             }
         }
     });
+}
+
+// 删除记录时调用：读取当前系统剪贴板内容哈希并加入忽略列表
+fn ignore_current_clipboard(state: &AppState) {
+    let h = (|| {
+        let mut cb = Clipboard::new().ok()?;
+        if let Ok(t) = cb.get_text() {
+            let t = t.trim_end_matches('\0');
+            if !t.is_empty() {
+                return Some(hash_bytes(t.as_bytes()));
+            }
+        }
+        if let Ok(img) = cb.get_image() {
+            if let Some((png, _, _)) = png_from_arboard(&img) {
+                return Some(hash_bytes(&png));
+            }
+        }
+        clipboard_files().map(|f| hash_bytes(f.join("\n").as_bytes()))
+    })();
+    *state.ignored_hash.lock().unwrap() = h;
+}
+
+// 监听线程写入前调用：被忽略的内容（刚删除的）跳过；剪贴板换成新内容后忽略自动失效
+fn should_skip(state: &AppState, h: u64) -> bool {
+    let mut ig = state.ignored_hash.lock().unwrap();
+    match *ig {
+        Some(x) if x == h => true,
+        Some(_) => {
+            *ig = None;
+            false
+        }
+        None => false,
+    }
 }
 
 // ---------- 命令 ----------
@@ -611,6 +655,7 @@ fn count_pinned_in_range(state: State<AppState>, range: String) -> i64 {
 
 #[tauri::command]
 fn delete_range(state: State<AppState>, range: String, include_pinned: bool) -> Result<i64, String> {
+    ignore_current_clipboard(&state);
     let db = state.db.lock().unwrap();
     let cond = range_where(&range, now_secs());
     let pinned_cond = if include_pinned { "1=1" } else { "pinned = 0" };
@@ -623,6 +668,7 @@ fn delete_range(state: State<AppState>, range: String, include_pinned: bool) -> 
 
 #[tauri::command]
 fn delete_clip(state: State<AppState>, id: i64) -> Result<(), String> {
+    ignore_current_clipboard(&state);
     let db = state.db.lock().unwrap();
     db.execute("DELETE FROM clips WHERE id=?1", params![id])
         .map_err(|e| e.to_string())?;
@@ -1057,6 +1103,7 @@ pub fn run() {
                 db: Mutex::new(db),
                 config: Mutex::new(config.clone()),
                 config_file,
+                ignored_hash: Mutex::new(None),
             });
 
             // 托盘
