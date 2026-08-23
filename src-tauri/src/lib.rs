@@ -1,6 +1,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -130,6 +131,11 @@ struct AppState {
     last_seen: Mutex<u64>,
     // 托盘「开启记录」勾选项，用于跨界面同步勾选状态
     tray_toggle: Mutex<Option<tauri::menu::CheckMenuItem<tauri::Wry>>>,
+    // 粘贴防抖：连点时合并为一次粘贴
+    paste_pending: Mutex<bool>,
+    paste_running: AtomicBool,
+    // 面板弹出前的前台窗口，粘贴后把焦点还给它
+    prev_hwnd: Mutex<isize>,
 }
 
 fn now_secs() -> i64 {
@@ -670,25 +676,89 @@ fn copy_clip(state: State<AppState>, id: i64) -> Result<(), String> {
     set_clipboard_by_id(&state, id)
 }
 
+// 前台窗口句柄读取/归还（Windows）
+#[cfg(target_family = "windows")]
+fn foreground_hwnd() -> isize {
+    extern "system" {
+        fn GetForegroundWindow() -> *mut std::ffi::c_void;
+    }
+    unsafe { GetForegroundWindow() as isize }
+}
+
+#[cfg(target_family = "windows")]
+fn focus_hwnd(hwnd: isize) {
+    extern "system" {
+        fn SetForegroundWindow(h: *mut std::ffi::c_void) -> i32;
+    }
+    unsafe {
+        SetForegroundWindow(hwnd as *mut std::ffi::c_void);
+    }
+}
+
+#[cfg(not(target_family = "windows"))]
+fn foreground_hwnd() -> isize {
+    0
+}
+
+#[cfg(not(target_family = "windows"))]
+fn focus_hwnd(_hwnd: isize) {}
+
+fn simulate_paste() {
+    use enigo::{Direction, Enigo, Key, Keyboard, Settings};
+    if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
+        let modifier = if cfg!(target_os = "macos") {
+            Key::Meta
+        } else {
+            Key::Control
+        };
+        let _ = enigo.key(modifier, Direction::Press);
+        let _ = enigo.key(Key::Unicode('v'), Direction::Click);
+        let _ = enigo.key(modifier, Direction::Release);
+    }
+}
+
 #[tauri::command]
 fn paste_clip(state: State<AppState>, app: AppHandle, id: i64) -> Result<(), String> {
+    // 剪贴板内容立即更新（连点时始终是最新点击的内容）
     set_clipboard_by_id(&state, id)?;
-    // 隐藏面板，把焦点还给目标窗口，再模拟 Ctrl+V（mac 为 Cmd+V）
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.hide();
+    *state.paste_pending.lock().unwrap() = true;
+
+    // 防抖合并：worker 已在跑就只更新标记，由它统一执行最后一次粘贴
+    if state.paste_running.swap(true, Ordering::SeqCst) {
+        return Ok(());
     }
-    std::thread::sleep(Duration::from_millis(150));
-    std::thread::spawn(|| {
-        use enigo::{Direction, Enigo, Key, Keyboard, Settings};
-        if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
-            let modifier = if cfg!(target_os = "macos") {
-                Key::Meta
-            } else {
-                Key::Control
-            };
-            let _ = enigo.key(modifier, Direction::Press);
-            let _ = enigo.key(Key::Unicode('v'), Direction::Click);
-            let _ = enigo.key(modifier, Direction::Release);
+    let app2 = app.clone();
+    std::thread::spawn(move || {
+        let state = app2.state::<AppState>();
+        'outer: loop {
+            // 等待点击稳定：160ms 内没有新点击才继续
+            loop {
+                std::thread::sleep(Duration::from_millis(160));
+                let mut p = state.paste_pending.lock().unwrap();
+                if !*p {
+                    break;
+                }
+                *p = false;
+            }
+            // 隐藏面板，把焦点还给弹出面板前的前台窗口，再模拟 Ctrl+V
+            if let Some(win) = app2.get_webview_window("main") {
+                let _ = win.hide();
+            }
+            let hwnd = *state.prev_hwnd.lock().unwrap();
+            if hwnd != 0 {
+                focus_hwnd(hwnd);
+            }
+            std::thread::sleep(Duration::from_millis(120));
+            simulate_paste();
+
+            state.paste_running.store(false, Ordering::SeqCst);
+            // 兜底：刚结束又来了新点击，自己继续跑（否则新 worker 已接管）
+            if *state.paste_pending.lock().unwrap()
+                && !state.paste_running.swap(true, Ordering::SeqCst)
+            {
+                continue 'outer;
+            }
+            break;
         }
     });
     Ok(())
@@ -1193,6 +1263,8 @@ fn toggle_window(app: &AppHandle) {
         if win.is_visible().unwrap_or(false) {
             let _ = win.hide();
         } else {
+            // 记住弹出前的前台窗口，粘贴后把焦点还给它
+            *app.state::<AppState>().prev_hwnd.lock().unwrap() = foreground_hwnd();
             let _ = win.show();
             let _ = win.set_focus();
             let _ = app.emit("panel-shown", ());
@@ -1245,6 +1317,9 @@ pub fn run() {
                 ignored_hashes: Mutex::new(Vec::new()),
                 last_seen: Mutex::new(0),
                 tray_toggle: Mutex::new(None),
+                paste_pending: Mutex::new(false),
+                paste_running: AtomicBool::new(false),
+                prev_hwnd: Mutex::new(0),
             });
 
             // 托盘
