@@ -719,49 +719,45 @@ fn simulate_paste() {
 
 #[tauri::command]
 fn paste_clip(state: State<AppState>, app: AppHandle, id: i64) -> Result<(), String> {
-    // 剪贴板内容立即更新（连点时始终是最新点击的内容）
+    // 剪贴板内容立即更新
     set_clipboard_by_id(&state, id)?;
     *state.paste_pending.lock().unwrap() = true;
 
-    // 防抖合并：worker 已在跑就只更新标记，由它统一执行最后一次粘贴
+    // 已有粘贴 worker 在跑：标记排队即可，它完成后会立刻补下一次
     if state.paste_running.swap(true, Ordering::SeqCst) {
         return Ok(());
     }
     let app2 = app.clone();
-    std::thread::spawn(move || {
-        let state = app2.state::<AppState>();
-        'outer: loop {
-            // 等待点击稳定：160ms 内没有新点击才继续
-            loop {
-                std::thread::sleep(Duration::from_millis(160));
-                let mut p = state.paste_pending.lock().unwrap();
-                if !*p {
-                    break;
-                }
-                *p = false;
-            }
-            // 隐藏面板，把焦点还给弹出面板前的前台窗口，再模拟 Ctrl+V
-            if let Some(win) = app2.get_webview_window("main") {
-                let _ = win.hide();
-            }
-            let hwnd = *state.prev_hwnd.lock().unwrap();
-            if hwnd != 0 {
-                focus_hwnd(hwnd);
-            }
-            std::thread::sleep(Duration::from_millis(120));
-            simulate_paste();
-
-            state.paste_running.store(false, Ordering::SeqCst);
-            // 兜底：刚结束又来了新点击，自己继续跑（否则新 worker 已接管）
-            if *state.paste_pending.lock().unwrap()
-                && !state.paste_running.swap(true, Ordering::SeqCst)
-            {
-                continue 'outer;
-            }
-            break;
-        }
-    });
+    std::thread::spawn(move || paste_worker(app2));
     Ok(())
+}
+
+// 粘贴工作线程主体（独立函数便于重入）
+fn paste_worker(app: AppHandle) {
+    let state = app.state::<AppState>();
+    loop {
+        {
+            let mut p = state.paste_pending.lock().unwrap();
+            if !*p {
+                break;
+            }
+            *p = false;
+        }
+        if let Some(win) = app.get_webview_window("main") {
+            let _ = win.hide();
+        }
+        let hwnd = *state.prev_hwnd.lock().unwrap();
+        if hwnd != 0 {
+            focus_hwnd(hwnd);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        simulate_paste();
+    }
+    state.paste_running.store(false, Ordering::SeqCst);
+    if *state.paste_pending.lock().unwrap() && !state.paste_running.swap(true, Ordering::SeqCst) {
+        let app2 = app.clone();
+        std::thread::spawn(move || paste_worker(app2));
+    }
 }
 
 fn range_where(range: &str, now: i64) -> String {
