@@ -26,6 +26,37 @@ let clips: Clip[] = [];
 let selected = 0;
 let config: AppConfig | null = null;
 
+// ---------- 图片缩略图懒加载：进入可视区域才取回数据，带缓存 ----------
+const imageCache = new Map<number, string>();
+
+async function loadThumb(el: HTMLElement, id: number) {
+  let b64 = imageCache.get(id);
+  if (!b64) {
+    b64 = (await invoke<string | null>("get_clip_image", { id })) ?? undefined;
+    if (b64) {
+      if (imageCache.size > 50) imageCache.clear(); // 简单上限，防止无限增长
+      imageCache.set(id, b64);
+    }
+  }
+  if (!b64 || !el.isConnected) return;
+  const img = document.createElement("img");
+  img.src = `data:image/png;base64,${b64}`;
+  img.className = "clip-thumb";
+  el.replaceWith(img);
+}
+
+const imgObserver = new IntersectionObserver(
+  (entries) => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      imgObserver.unobserve(e.target);
+      const el = e.target as HTMLElement;
+      loadThumb(el, Number(el.dataset.imgId));
+    }
+  },
+  { root: listEl, rootMargin: "200px" } // 提前 200px 预加载
+);
+
 function fmtTime(ts: number): string {
   const d = new Date(ts * 1000);
   const now = new Date();
@@ -64,11 +95,14 @@ async function refresh(keepSelection = false) {
 
     const body = document.createElement("div");
     body.className = "clip-body";
-    if (c.kind === "image" && c.image_b64) {
-      const img = document.createElement("img");
-      img.src = `data:image/png;base64,${c.image_b64}`;
-      img.className = "clip-thumb";
-      body.appendChild(img);
+    if (c.kind === "image") {
+      // 图片懒加载占位，滚动到可视区域时再取回数据
+      const ph = document.createElement("div");
+      ph.className = "clip-thumb-placeholder";
+      ph.textContent = c.preview;
+      ph.dataset.imgId = String(c.id);
+      body.appendChild(ph);
+      imgObserver.observe(ph);
     } else {
       const p = document.createElement("div");
       p.className = "clip-text";

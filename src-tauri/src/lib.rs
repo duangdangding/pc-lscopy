@@ -549,15 +549,16 @@ fn ignore_current_clipboard(state: &AppState) {
 #[tauri::command]
 fn list_clips(state: State<AppState>, keyword: Option<String>) -> Vec<Clip> {
     let db = state.db.lock().unwrap();
+    // 列表查询不读取 image blob，图片由前端懒加载（get_clip_image），避免大数据量卡顿
     let (sql, kw): (&str, Option<String>) = match &keyword {
         Some(k) if !k.trim().is_empty() => (
-            "SELECT id, kind, content, image, width, height, pinned, created_at FROM clips
+            "SELECT id, kind, content, width, height, pinned, created_at FROM clips
              WHERE content LIKE ?1
              ORDER BY pinned DESC, created_at DESC LIMIT 500",
             Some(format!("%{}%", k.trim())),
         ),
         _ => (
-            "SELECT id, kind, content, image, width, height, pinned, created_at FROM clips
+            "SELECT id, kind, content, width, height, pinned, created_at FROM clips
              ORDER BY pinned DESC, created_at DESC LIMIT 500",
             None,
         ),
@@ -569,15 +570,11 @@ fn list_clips(state: State<AppState>, keyword: Option<String>) -> Vec<Clip> {
     let map_row = |row: &rusqlite::Row| -> rusqlite::Result<Clip> {
         let kind: String = row.get(1)?;
         let content: Option<String> = row.get(2)?;
-        let img: Option<Vec<u8>> = row.get(3)?;
-        let w: Option<u32> = row.get(4)?;
-        let h: Option<u32> = row.get(5)?;
+        let w: Option<u32> = row.get(3)?;
+        let h: Option<u32> = row.get(4)?;
         let url = content.as_deref().and_then(first_url);
-        let (preview, image_b64) = if kind == "image" {
-            (
-                format!("[图片 {}x{}]", w.unwrap_or(0), h.unwrap_or(0)),
-                img.map(|b| B64.encode(b)),
-            )
+        let preview = if kind == "image" {
+            format!("[图片 {}x{}]", w.unwrap_or(0), h.unwrap_or(0))
         } else if kind == "file" {
             // content 为换行分隔的文件路径列表
             let paths: Vec<&str> = content
@@ -590,25 +587,23 @@ fn list_clips(state: State<AppState>, keyword: Option<String>) -> Vec<Clip> {
                 .first()
                 .and_then(|p| p.rsplit(['\\', '/']).next())
                 .unwrap_or("文件");
-            let preview = if paths.len() > 1 {
+            if paths.len() > 1 {
                 format!("📄 {} 等 {} 个文件", first, paths.len())
             } else {
                 format!("📄 {}", first)
-            };
-            (preview, None)
+            }
         } else {
             let t = content.unwrap_or_default();
-            let preview: String = t.chars().take(300).collect();
-            (preview, None)
+            t.chars().take(300).collect()
         };
         Ok(Clip {
             id: row.get(0)?,
             kind,
             preview,
-            image_b64,
+            image_b64: None, // 列表不携带图片数据
             url,
-            pinned: row.get::<_, i64>(6)? != 0,
-            created_at: row.get(7)?,
+            pinned: row.get::<_, i64>(5)? != 0,
+            created_at: row.get(6)?,
         })
     };
     let rows = match kw {
@@ -619,6 +614,16 @@ fn list_clips(state: State<AppState>, keyword: Option<String>) -> Vec<Clip> {
         Ok(mapped) => mapped.filter_map(|r| r.ok()).collect(),
         Err(_) => vec![],
     }
+}
+
+// 前端懒加载图片：滚动到可视区域时才取回 base64
+#[tauri::command]
+fn get_clip_image(state: State<AppState>, id: i64) -> Option<String> {
+    let db = state.db.lock().unwrap();
+    let img: Option<Vec<u8>> = db
+        .query_row("SELECT image FROM clips WHERE id=?1", params![id], |r| r.get(0))
+        .ok()?;
+    img.map(|b| B64.encode(b))
 }
 
 #[tauri::command]
@@ -1418,7 +1423,8 @@ pub fn run() {
             open_clip_with_system,
             count_pinned_between,
             delete_between,
-            set_enabled
+            set_enabled,
+            get_clip_image
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

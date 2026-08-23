@@ -214,28 +214,36 @@ $("#btn-save").addEventListener("click", async () => {
   }
 });
 
-// ---------- 字体可搜索下拉框 ----------
+// ---------- 字体选择器：只读输入框 + 面板内搜索 ----------
 const fontDropdownEl = $<HTMLDivElement>("#font-dropdown");
+const fontSearchEl = $<HTMLInputElement>("#font-search");
+const fontListEl = $<HTMLDivElement>("#font-list");
+const fontPickerEl = document.querySelector<HTMLDivElement>(".font-picker")!;
 let allFonts: string[] = [];
 
-function renderFontDropdown(filter: string) {
+function renderFontList(filter: string) {
   const q = filter.trim().toLowerCase();
   const matched = allFonts.filter((f) => f.toLowerCase().includes(q)).slice(0, 200);
-  fontDropdownEl.innerHTML = "";
+  fontListEl.innerHTML = "";
   for (const f of matched) {
     const div = document.createElement("div");
     div.className = "font-option" + (f === fontFamilyEl.value ? " active" : "");
     div.textContent = f;
     div.style.fontFamily = f;
     div.title = f;
-    div.onmousedown = (e) => {
-      e.preventDefault(); // 阻止 input 失焦，保证点击生效
+    div.onclick = () => {
       fontFamilyEl.value = f;
       closeFontDropdown();
     };
-    fontDropdownEl.appendChild(div);
+    fontListEl.appendChild(div);
   }
-  fontDropdownEl.style.display = matched.length ? "block" : "none";
+}
+
+function openFontDropdown() {
+  renderFontList("");
+  fontSearchEl.value = "";
+  fontDropdownEl.style.display = "block";
+  window.setTimeout(() => fontSearchEl.focus(), 0);
 }
 
 function closeFontDropdown() {
@@ -244,21 +252,29 @@ function closeFontDropdown() {
 
 function initFontPicker(fonts: string[]) {
   allFonts = fonts;
-  fontFamilyEl.addEventListener("focus", () => renderFontDropdown(""));
-  fontFamilyEl.addEventListener("input", () => renderFontDropdown(fontFamilyEl.value));
-  fontFamilyEl.addEventListener("blur", closeFontDropdown);
-  fontFamilyEl.addEventListener("keydown", (e) => {
+  fontFamilyEl.addEventListener("click", () => {
+    if (fontDropdownEl.style.display === "block") {
+      closeFontDropdown();
+    } else {
+      openFontDropdown();
+    }
+  });
+  fontSearchEl.addEventListener("input", () => renderFontList(fontSearchEl.value));
+  fontSearchEl.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       closeFontDropdown();
-      fontFamilyEl.blur();
     } else if (e.key === "Enter") {
       e.preventDefault();
-      const first = fontDropdownEl.querySelector<HTMLDivElement>(".font-option");
-      if (first && fontDropdownEl.style.display !== "none") {
-        fontFamilyEl.value = first.textContent || first.title;
+      const first = fontListEl.querySelector<HTMLDivElement>(".font-option");
+      if (first) {
+        fontFamilyEl.value = first.title;
         closeFontDropdown();
       }
     }
+  });
+  // 点击选择器外部时关闭
+  document.addEventListener("mousedown", (e) => {
+    if (!fontPickerEl.contains(e.target as Node)) closeFontDropdown();
   });
 }
 

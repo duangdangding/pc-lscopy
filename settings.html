@@ -59,10 +59,13 @@
               <input id="font-size" type="number" min="10" max="24" />
             </label>
           </div>
-          <label class="field full">字体（点击展开系统字体列表，可输入搜索）
+          <label class="field full">字体（点击展开系统字体列表）
             <div class="font-picker">
-              <input id="font-family" type="text" placeholder="点击选择或输入搜索字体..." autocomplete="off" />
-              <div id="font-dropdown" class="font-dropdown"></div>
+              <input id="font-family" type="text" readonly placeholder="点击选择字体..." />
+              <div id="font-dropdown" class="font-dropdown">
+                <input id="font-search" class="font-search" type="text" placeholder="搜索字体..." autocomplete="off" />
+                <div id="font-list"></div>
+              </div>
             </div>
           </label>
         </section>
