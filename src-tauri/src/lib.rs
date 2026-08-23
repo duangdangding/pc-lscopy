@@ -161,8 +161,7 @@ fn init_db(path: &PathBuf) -> Result<Connection, String> {
             hash INTEGER,
             created_at INTEGER NOT NULL
         );
-        CREATE INDEX IF NOT EXISTS idx_clips_time ON clips(created_at DESC);
-        CREATE INDEX IF NOT EXISTS idx_clips_hash ON clips(hash);",
+        CREATE INDEX IF NOT EXISTS idx_clips_time ON clips(created_at DESC);",
     )
     .map_err(|e| e.to_string())?;
     // 旧版本库迁移：补 pinned 列
@@ -170,12 +169,14 @@ fn init_db(path: &PathBuf) -> Result<Connection, String> {
         conn.execute_batch("ALTER TABLE clips ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
             .map_err(|e| e.to_string())?;
     }
-    // 旧版本库迁移：补 hash 列并回填已有数据
+    // 旧版本库迁移：补 hash 列并回填已有数据（必须在建 hash 索引之前）
     if conn.prepare("SELECT hash FROM clips LIMIT 1").is_err() {
         conn.execute_batch("ALTER TABLE clips ADD COLUMN hash INTEGER")
             .map_err(|e| e.to_string())?;
         backfill_hashes(&conn);
     }
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_clips_hash ON clips(hash);")
+        .map_err(|e| e.to_string())?;
     Ok(conn)
 }
 
