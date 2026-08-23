@@ -8,6 +8,7 @@ const $ = <T extends HTMLElement>(sel: string) =>
   document.querySelector<T>(sel)!;
 
 const hotkeyEl = $<HTMLInputElement>("#hotkey");
+const enabledEl = $<HTMLInputElement>("#enabled");
 const autostartEl = $<HTMLInputElement>("#autostart");
 const silentStartEl = $<HTMLInputElement>("#silent-start");
 const dbDirEl = $<HTMLInputElement>("#db-dir");
@@ -186,6 +187,7 @@ $("#db-info-refresh").addEventListener("click", refreshDbInfo);
 $("#btn-save").addEventListener("click", async () => {
   const next: AppConfig = {
     hotkey: hotkeyEl.value.trim() || "Ctrl+`",
+    enabled: enabledEl.checked,
     autostart: autostartEl.checked,
     silent_start: silentStartEl.checked,
     db_dir: dbDirEl.value.trim() || null,
@@ -260,13 +262,17 @@ function initFontPicker(fonts: string[]) {
   });
 }
 
-listen<AppConfig>("config-changed", (e) => applyAppearance(e.payload));
+listen<AppConfig>("config-changed", (e) => {
+  applyAppearance(e.payload);
+  enabledEl.checked = e.payload.enabled;
+});
 
 (async () => {
   config = await loadConfig();
   applyAppearance(config);
 
   hotkeyEl.value = config.hotkey;
+  enabledEl.checked = config.enabled;
   autostartEl.checked = config.autostart;
   silentStartEl.checked = config.silent_start;
   dbDirEl.value = config.db_dir || "";

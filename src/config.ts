@@ -12,6 +12,7 @@ export interface AppConfig {
   max_items: number;
   retention_value: number; // 数据保留时长数值，0 = 永久保留
   retention_unit: string; // "hours" | "days" | "months" | "years"
+  enabled: boolean; // 是否开启剪贴板记录
 }
 
 export async function loadConfig(): Promise<AppConfig> {

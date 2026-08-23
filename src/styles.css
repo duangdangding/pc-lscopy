@@ -82,6 +82,21 @@ body {
   border-color: var(--accent);
 }
 
+.record-switch {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.record-switch input {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
 .clip-list {
   flex: 1;
   overflow-y: auto;

@@ -9,7 +9,7 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use tauri::{
-    menu::{Menu, MenuItem},
+    menu::{CheckMenuItem, Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, State, WindowEvent,
 };
@@ -34,6 +34,7 @@ pub struct AppConfig {
     pub max_items: i64,          // 最多保留条数（不含置顶），0 = 无限制
     pub retention_value: u32,    // 数据保留时长数值，0 = 永久保留
     pub retention_unit: String,  // "hours" | "days" | "months" | "years"
+    pub enabled: bool,           // 是否开启剪贴板记录
 }
 
 impl Default for AppConfig {
@@ -50,6 +51,7 @@ impl Default for AppConfig {
             max_items: 0,
             retention_value: 0,
             retention_unit: "days".into(),
+            enabled: true,
         }
     }
 }
@@ -122,8 +124,12 @@ struct AppState {
     db: Mutex<Connection>,
     config: Mutex<AppConfig>,
     config_file: PathBuf,
-    // 删除记录时忽略当前剪贴板内容，防止监听线程把刚删掉的内容再加回来
-    ignored_hash: Mutex<Option<u64>>,
+    // 已删除/被排除内容的哈希集合：命中即跳过，直到有新内容入库后清空
+    ignored_hashes: Mutex<Vec<u64>>,
+    // 监听线程已处理过的剪贴板内容哈希，避免轮询重复处理同一内容
+    last_seen: Mutex<u64>,
+    // 托盘「开启记录」勾选项，用于跨界面同步勾选状态
+    tray_toggle: Mutex<Option<tauri::menu::CheckMenuItem<tauri::Wry>>>,
 }
 
 fn now_secs() -> i64 {
@@ -400,6 +406,56 @@ fn is_excluded(cfg: &AppConfig) -> bool {
     }
 }
 
+// 剪贴板候选内容
+enum Cand {
+    Text(String, u64),
+    Image(Vec<u8>, u32, u32, u64),
+    File(String, u64),
+}
+
+impl Cand {
+    fn hash(&self) -> u64 {
+        match self {
+            Cand::Text(_, h) | Cand::Image(_, _, _, h) | Cand::File(_, h) => *h,
+        }
+    }
+}
+
+fn read_clipboard(cb: &mut Clipboard) -> Option<Cand> {
+    if let Ok(text) = cb.get_text() {
+        let text = text.trim_end_matches('\0').to_string();
+        if !text.is_empty() {
+            let h = hash_bytes(text.as_bytes());
+            return Some(Cand::Text(text, h));
+        }
+    }
+    if let Ok(img) = cb.get_image() {
+        if let Some((png, w, hgt)) = png_from_arboard(&img) {
+            if png.len() <= 20 * 1024 * 1024 {
+                let h = hash_bytes(&png);
+                return Some(Cand::Image(png, w, hgt, h));
+            }
+        }
+        return None;
+    }
+    clipboard_files().map(|files| {
+        let joined = files.join("\n");
+        let h = hash_bytes(joined.as_bytes());
+        Cand::File(joined, h)
+    })
+}
+
+// 把哈希加入忽略集合（去重、上限 64 条）
+fn push_ignored(state: &AppState, h: u64) {
+    let mut ig = state.ignored_hashes.lock().unwrap();
+    if !ig.contains(&h) {
+        if ig.len() >= 64 {
+            ig.remove(0);
+        }
+        ig.push(h);
+    }
+}
+
 fn start_watcher(app: AppHandle) {
     std::thread::spawn(move || {
         let mut cb = match Clipboard::new() {
@@ -410,96 +466,75 @@ fn start_watcher(app: AppHandle) {
             std::thread::sleep(Duration::from_millis(600));
             let state = app.state::<AppState>();
 
-            let (excluded, max_items) = {
+            let (enabled, excluded, max_items) = {
                 let cfg = state.config.lock().unwrap();
                 // 每轮顺便执行保留时长清理（删除过期的非置顶记录）
                 let db = state.db.lock().unwrap();
                 apply_retention(&db, &cfg);
-                (is_excluded(&cfg), cfg.max_items)
+                (cfg.enabled, is_excluded(&cfg), cfg.max_items)
             };
-            if excluded {
+
+            let Some(cand) = read_clipboard(&mut cb) else {
+                continue;
+            };
+            let h = cand.hash();
+
+            // 剪贴板内容没变化，跳过
+            {
+                let mut last = state.last_seen.lock().unwrap();
+                if *last == h {
+                    continue;
+                }
+                *last = h;
+            }
+
+            // 记录开关关闭：只标记已见，不存储（重新开启时之前的内容不会补录）
+            if !enabled {
                 continue;
             }
 
-            // 优先文字，其次图片，最后文件（相同内容走 store_clip 去重，只移到最前）
-            if let Ok(text) = cb.get_text() {
-                let text = text.trim_end_matches('\0').to_string();
-                if !text.is_empty() {
-                    let h = hash_bytes(text.as_bytes());
-                    if should_skip(&state, h) {
-                        continue;
-                    }
-                    let db = state.db.lock().unwrap();
-                    if store_clip(&db, "text", Some(&text), None, None, None, h) {
-                        prune(&db, max_items);
-                        let _ = app.emit("clip-added", ());
-                    }
-                    continue;
-                }
-            }
-            if let Ok(img) = cb.get_image() {
-                if let Some((png, w, hgt)) = png_from_arboard(&img) {
-                    if png.len() <= 20 * 1024 * 1024 {
-                        let h = hash_bytes(&png);
-                        if should_skip(&state, h) {
-                            continue;
-                        }
-                        let db = state.db.lock().unwrap();
-                        if store_clip(&db, "image", None, Some(&png), Some(w), Some(hgt), h) {
-                            prune(&db, max_items);
-                            let _ = app.emit("clip-added", ());
-                        }
-                    }
-                }
+            // 排除的应用：在该应用中复制的内容加入忽略集合，离开/移除排除后也不入库
+            if excluded {
+                push_ignored(&state, h);
                 continue;
             }
-            // 资源管理器里复制的文件/文件夹（视频等）
-            if let Some(files) = clipboard_files() {
-                let joined = files.join("\n");
-                let h = hash_bytes(joined.as_bytes());
-                if should_skip(&state, h) {
+
+            // 被忽略的内容（刚删除的 / 排除应用里复制的）跳过
+            {
+                let mut ig = state.ignored_hashes.lock().unwrap();
+                if ig.contains(&h) {
                     continue;
                 }
-                let db = state.db.lock().unwrap();
-                if store_clip(&db, "file", Some(&joined), None, None, None, h) {
-                    prune(&db, max_items);
-                    let _ = app.emit("clip-added", ());
+                // 有新内容正常入库，旧的忽略记录不再需要
+                ig.clear();
+            }
+
+            let db = state.db.lock().unwrap();
+            let changed = match &cand {
+                Cand::Text(text, h) => store_clip(&db, "text", Some(text), None, None, None, *h),
+                Cand::Image(png, w, hgt, h) => {
+                    store_clip(&db, "image", None, Some(png), Some(*w), Some(*hgt), *h)
                 }
+                Cand::File(joined, h) => store_clip(&db, "file", Some(joined), None, None, None, *h),
+            };
+            if changed {
+                prune(&db, max_items);
+                let _ = app.emit("clip-added", ());
             }
         }
     });
 }
 
-// 删除记录时调用：读取当前系统剪贴板内容哈希并加入忽略列表
+// 删除记录 / 重新开启记录时调用：读取当前系统剪贴板内容哈希并加入忽略集合
 fn ignore_current_clipboard(state: &AppState) {
     let h = (|| {
         let mut cb = Clipboard::new().ok()?;
-        if let Ok(t) = cb.get_text() {
-            let t = t.trim_end_matches('\0');
-            if !t.is_empty() {
-                return Some(hash_bytes(t.as_bytes()));
-            }
-        }
-        if let Ok(img) = cb.get_image() {
-            if let Some((png, _, _)) = png_from_arboard(&img) {
-                return Some(hash_bytes(&png));
-            }
-        }
-        clipboard_files().map(|f| hash_bytes(f.join("\n").as_bytes()))
+        read_clipboard(&mut cb).map(|c| c.hash())
     })();
-    *state.ignored_hash.lock().unwrap() = h;
-}
-
-// 监听线程写入前调用：被忽略的内容（刚删除的）跳过；剪贴板换成新内容后忽略自动失效
-fn should_skip(state: &AppState, h: u64) -> bool {
-    let mut ig = state.ignored_hash.lock().unwrap();
-    match *ig {
-        Some(x) if x == h => true,
-        Some(_) => {
-            *ig = None;
-            false
-        }
-        None => false,
+    if let Some(h) = h {
+        push_ignored(state, h);
+        // 同时标记为已见，防止轮询把当前内容当新内容处理
+        *state.last_seen.lock().unwrap() = h;
     }
 }
 
@@ -827,8 +862,15 @@ fn save_config(app: AppHandle, state: State<AppState>, config: AppConfig) -> Res
     // 3. 应用开机自启
     apply_autostart(&app, config.autostart);
 
-    // 4. 持久化 + 广播
+    // 4. 持久化 + 同步托盘开关 + 广播
     save_config_file(&state.config_file, &config)?;
+    if config.enabled {
+        // 从关闭切到开启时，忽略当前剪贴板内容（关闭期间的不补录）
+        ignore_current_clipboard(&state);
+    }
+    if let Some(item) = state.tray_toggle.lock().unwrap().as_ref() {
+        let _ = item.set_checked(config.enabled);
+    }
     *state.config.lock().unwrap() = config.clone();
     let _ = app.emit("config-changed", config);
     Ok(())
@@ -969,6 +1011,30 @@ fn list_system_fonts() -> Vec<String> {
     {
         vec![]
     }
+}
+
+// 开关「剪贴板记录」的统一入口：托盘菜单 / 弹窗页 / 设置页共用
+fn set_recording_enabled(app: &AppHandle, enabled: bool) {
+    let state = app.state::<AppState>();
+    let cfg = {
+        let mut cfg = state.config.lock().unwrap();
+        cfg.enabled = enabled;
+        let _ = save_config_file(&state.config_file, &cfg);
+        cfg.clone()
+    };
+    if enabled {
+        // 关闭期间复制的内容不入库：开启瞬间忽略当前剪贴板内容
+        ignore_current_clipboard(&state);
+    }
+    if let Some(item) = state.tray_toggle.lock().unwrap().as_ref() {
+        let _ = item.set_checked(enabled);
+    }
+    let _ = app.emit("config-changed", cfg);
+}
+
+#[tauri::command]
+fn set_enabled(app: AppHandle, enabled: bool) {
+    set_recording_enabled(&app, enabled);
 }
 
 #[tauri::command]
@@ -1176,20 +1242,27 @@ pub fn run() {
                 db: Mutex::new(db),
                 config: Mutex::new(config.clone()),
                 config_file,
-                ignored_hash: Mutex::new(None),
+                ignored_hashes: Mutex::new(Vec::new()),
+                last_seen: Mutex::new(0),
+                tray_toggle: Mutex::new(None),
             });
 
             // 托盘
             let show = MenuItem::with_id(app, "show", "显示面板", true, None::<&str>)?;
+            let toggle = CheckMenuItem::with_id(app, "toggle", "开启剪贴板记录", true, config.enabled, None::<&str>)?;
             let settings = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &settings, &quit])?;
+            let menu = Menu::with_items(app, &[&show, &toggle, &settings, &quit])?;
             TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
                 .tooltip(&format!("剪贴板管家 ({})", config.hotkey))
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => toggle_window(app),
+                    "toggle" => {
+                        let current = app.state::<AppState>().config.lock().unwrap().enabled;
+                        set_recording_enabled(app, !current);
+                    }
                     "settings" => {
                         if let Some(w) = app.get_webview_window("settings") {
                             let _ = w.show();
@@ -1211,6 +1284,9 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
+
+            // 托盘开关存入状态，供其他界面同步勾选
+            *app.state::<AppState>().tray_toggle.lock().unwrap() = Some(toggle);
 
             // 全局热键（默认 Ctrl+`）
             register_hotkey(app.handle(), &config.hotkey)?;
@@ -1270,7 +1346,8 @@ pub fn run() {
             list_system_fonts,
             open_clip_with_system,
             count_pinned_between,
-            delete_between
+            delete_between,
+            set_enabled
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

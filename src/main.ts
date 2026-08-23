@@ -208,6 +208,12 @@ searchEl.addEventListener("input", () => {
 document.querySelector<HTMLButtonElement>("#btn-settings")!.onclick = () =>
   invoke("open_settings");
 
+// 记录开关：三处（托盘/弹窗/设置页）通过 config-changed 事件保持同步
+const toggleEnabledEl = document.querySelector<HTMLInputElement>("#toggle-enabled")!;
+toggleEnabledEl.addEventListener("change", () => {
+  invoke("set_enabled", { enabled: toggleEnabledEl.checked });
+});
+
 // 后端新增记录 / 面板显示时自动刷新
 listen("clip-added", () => refresh(true));
 listen("panel-shown", () => {
@@ -220,11 +226,13 @@ listen<AppConfig>("config-changed", (e) => {
   config = e.payload;
   applyAppearance(config);
   updateHint();
+  toggleEnabledEl.checked = config.enabled;
 });
 
 (async () => {
   config = await loadConfig();
   applyAppearance(config);
   updateHint();
+  toggleEnabledEl.checked = config.enabled;
   refresh();
 })();
