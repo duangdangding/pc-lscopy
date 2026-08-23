@@ -10,6 +10,8 @@ export interface AppConfig {
   font_size: number;
   exclude_apps: string[];
   max_items: number;
+  retention_value: number; // 数据保留时长数值，0 = 永久保留
+  retention_unit: string; // "hours" | "days" | "months" | "years"
 }
 
 export async function loadConfig(): Promise<AppConfig> {

@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { applyAppearance, AppConfig, loadConfig } from "./config";
+import { confirmDialog } from "./confirm";
 
 const $ = <T extends HTMLElement>(sel: string) =>
   document.querySelector<T>(sel)!;
@@ -14,10 +15,24 @@ const themeEl = $<HTMLSelectElement>("#theme");
 const fontFamilyEl = $<HTMLInputElement>("#font-family");
 const fontSizeEl = $<HTMLInputElement>("#font-size");
 const maxItemsEl = $<HTMLInputElement>("#max-items");
+const retentionValueEl = $<HTMLInputElement>("#retention-value");
+const retentionUnitEl = $<HTMLSelectElement>("#retention-unit");
 const excludeAppsEl = $<HTMLTextAreaElement>("#exclude-apps");
 const saveMsgEl = $<HTMLSpanElement>("#save-msg");
 
 let config: AppConfig;
+
+// ---------- 标签页切换 ----------
+document.querySelectorAll<HTMLButtonElement>(".tabs .tab").forEach((tab) => {
+  tab.onclick = () => {
+    document.querySelectorAll(".tabs .tab").forEach((t) => t.classList.remove("active"));
+    document.querySelectorAll(".tab-panel").forEach((p) => ((p as HTMLElement).hidden = true));
+    tab.classList.add("active");
+    const panel = $(`#tab-${tab.dataset.tab}`);
+    panel.hidden = false;
+    if (tab.dataset.tab === "database") refreshDbInfo();
+  };
+});
 
 // ---------- 快捷键录制 ----------
 function keyName(e: KeyboardEvent): string | null {
@@ -92,6 +107,54 @@ $("#btn-import").addEventListener("click", async () => {
   }
 });
 
+// ---------- 删除管理 ----------
+// 预设范围批量删除：范围内有置顶记录时先询问
+document.querySelectorAll<HTMLButtonElement>("[data-range]").forEach((btn) => {
+  btn.onclick = async () => {
+    const range = btn.dataset.range!;
+    const pinnedCount = await invoke<number>("count_pinned_in_range", { range });
+    let includePinned = false;
+    if (pinnedCount > 0) {
+      includePinned = await confirmDialog(
+        `该范围内有 ${pinnedCount} 条置顶记录。\n「确定」= 连同置顶内容一起删除\n「取消」= 只删除非置顶记录`
+      );
+    } else if (range === "all") {
+      if (!(await confirmDialog("确定清空全部剪贴板记录？"))) return;
+    }
+    const n = await invoke<number>("delete_range", { range, includePinned });
+    $("#del-result").textContent = `已删除 ${n} 条记录`;
+    refreshDbInfo();
+  };
+});
+
+// 自定义时间区间删除
+$("#btn-del-between").addEventListener("click", async () => {
+  const startVal = $<HTMLInputElement>("#del-start").value;
+  const endVal = $<HTMLInputElement>("#del-end").value;
+  if (!startVal || !endVal) {
+    alert("请选择开始和结束时间");
+    return;
+  }
+  const start = Math.floor(new Date(startVal).getTime() / 1000);
+  const end = Math.floor(new Date(endVal).getTime() / 1000);
+  if (start > end) {
+    alert("开始时间不能晚于结束时间");
+    return;
+  }
+  const pinnedCount = await invoke<number>("count_pinned_between", { start, end });
+  let includePinned = false;
+  if (pinnedCount > 0) {
+    includePinned = await confirmDialog(
+      `该区间内有 ${pinnedCount} 条置顶记录。\n「确定」= 连同置顶内容一起删除\n「取消」= 只删除非置顶记录`
+    );
+  } else if (!(await confirmDialog("确定删除该时间区间内的所有记录？"))) {
+    return;
+  }
+  const n = await invoke<number>("delete_between", { start, end, includePinned });
+  $("#del-result").textContent = `已删除 ${n} 条记录`;
+  refreshDbInfo();
+});
+
 // ---------- 数据库信息 ----------
 function fmtSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -134,6 +197,8 @@ $("#btn-save").addEventListener("click", async () => {
       .map((s) => s.trim())
       .filter(Boolean),
     max_items: Math.max(10, Number(maxItemsEl.value) || 500),
+    retention_value: Math.max(0, Number(retentionValueEl.value) || 0),
+    retention_unit: retentionUnitEl.value,
   };
   try {
     await invoke("save_config", { config: next });
@@ -209,6 +274,8 @@ listen<AppConfig>("config-changed", (e) => applyAppearance(e.payload));
   fontFamilyEl.value = config.font_family;
   fontSizeEl.value = String(config.font_size);
   maxItemsEl.value = String(config.max_items);
+  retentionValueEl.value = String(config.retention_value ?? 0);
+  retentionUnitEl.value = config.retention_unit || "days";
   excludeAppsEl.value = (config.exclude_apps || []).join("\n");
 
   // 加载系统字体列表：可搜索下拉框，每项用自身字体预览

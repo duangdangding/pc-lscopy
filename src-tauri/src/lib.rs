@@ -32,6 +32,8 @@ pub struct AppConfig {
     pub font_size: u32,
     pub exclude_apps: Vec<String>, // 不记录这些程序里的复制（exe 名，小写）
     pub max_items: i64,          // 最多保留条数（不含置顶）
+    pub retention_value: u32,    // 数据保留时长数值，0 = 永久保留
+    pub retention_unit: String,  // "hours" | "days" | "months" | "years"
 }
 
 impl Default for AppConfig {
@@ -46,6 +48,8 @@ impl Default for AppConfig {
             font_size: 14,
             exclude_apps: vec![],
             max_items: 500,
+            retention_value: 0,
+            retention_unit: "days".into(),
         }
     }
 }
@@ -250,6 +254,31 @@ fn prune(db: &Connection, max_items: i64) {
     );
 }
 
+// 数据保留时长：计算截止时间戳，0 = 永久保留（None）
+fn retention_cutoff(cfg: &AppConfig) -> Option<i64> {
+    if cfg.retention_value == 0 {
+        return None;
+    }
+    let v = cfg.retention_value as i64;
+    let secs = match cfg.retention_unit.as_str() {
+        "hours" => v * 3600,
+        "months" => v * 30 * 86400,
+        "years" => v * 365 * 86400,
+        _ => v * 86400, // days
+    };
+    Some(now_secs() - secs)
+}
+
+// 删除超过保留时长的非置顶记录
+fn apply_retention(db: &Connection, cfg: &AppConfig) {
+    if let Some(cutoff) = retention_cutoff(cfg) {
+        let _ = db.execute(
+            "DELETE FROM clips WHERE pinned = 0 AND created_at < ?1",
+            params![cutoff],
+        );
+    }
+}
+
 // ---------- 剪贴板监听 ----------
 
 fn png_from_arboard(img: &arboard::ImageData) -> Option<(Vec<u8>, u32, u32)> {
@@ -383,6 +412,9 @@ fn start_watcher(app: AppHandle) {
 
             let (excluded, max_items) = {
                 let cfg = state.config.lock().unwrap();
+                // 每轮顺便执行保留时长清理（删除过期的非置顶记录）
+                let db = state.db.lock().unwrap();
+                apply_retention(&db, &cfg);
                 (is_excluded(&cfg), cfg.max_items)
             };
             if excluded {
@@ -654,7 +686,12 @@ fn count_pinned_in_range(state: State<AppState>, range: String) -> i64 {
 }
 
 #[tauri::command]
-fn delete_range(state: State<AppState>, range: String, include_pinned: bool) -> Result<i64, String> {
+fn delete_range(
+    state: State<AppState>,
+    app: AppHandle,
+    range: String,
+    include_pinned: bool,
+) -> Result<i64, String> {
     ignore_current_clipboard(&state);
     let db = state.db.lock().unwrap();
     let cond = range_where(&range, now_secs());
@@ -663,15 +700,51 @@ fn delete_range(state: State<AppState>, range: String, include_pinned: bool) -> 
         &format!("DELETE FROM clips WHERE {cond} AND {pinned_cond}"),
         [],
     );
+    drop(db);
+    let _ = app.emit("clip-added", ());
+    affected.map(|n| n as i64).map_err(|e| e.to_string())
+}
+
+// 自定义时间区间删除
+#[tauri::command]
+fn count_pinned_between(state: State<AppState>, start: i64, end: i64) -> i64 {
+    let db = state.db.lock().unwrap();
+    db.query_row(
+        "SELECT COUNT(*) FROM clips WHERE pinned = 1 AND created_at BETWEEN ?1 AND ?2",
+        params![start, end],
+        |r| r.get(0),
+    )
+    .unwrap_or(0)
+}
+
+#[tauri::command]
+fn delete_between(
+    state: State<AppState>,
+    app: AppHandle,
+    start: i64,
+    end: i64,
+    include_pinned: bool,
+) -> Result<i64, String> {
+    ignore_current_clipboard(&state);
+    let db = state.db.lock().unwrap();
+    let pinned_cond = if include_pinned { "1=1" } else { "pinned = 0" };
+    let affected = db.execute(
+        &format!("DELETE FROM clips WHERE created_at BETWEEN ?1 AND ?2 AND {pinned_cond}"),
+        params![start, end],
+    );
+    drop(db);
+    let _ = app.emit("clip-added", ());
     affected.map(|n| n as i64).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn delete_clip(state: State<AppState>, id: i64) -> Result<(), String> {
+fn delete_clip(state: State<AppState>, app: AppHandle, id: i64) -> Result<(), String> {
     ignore_current_clipboard(&state);
     let db = state.db.lock().unwrap();
     db.execute("DELETE FROM clips WHERE id=?1", params![id])
         .map_err(|e| e.to_string())?;
+    drop(db);
+    let _ = app.emit("clip-added", ());
     Ok(())
 }
 
@@ -1195,7 +1268,9 @@ pub fn run() {
             import_clips,
             open_settings,
             list_system_fonts,
-            open_clip_with_system
+            open_clip_with_system,
+            count_pinned_between,
+            delete_between
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

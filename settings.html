@@ -12,70 +12,130 @@
     <div class="settings-page">
       <h1>设置</h1>
 
-      <section class="card">
-        <h2>全局快捷键</h2>
-        <div class="row">
-          <input id="hotkey" type="text" readonly placeholder="点击此处，然后按下组合键" />
-          <button id="hotkey-reset" class="btn">恢复默认 Ctrl+`</button>
-        </div>
-        <p class="desc">用于呼出/隐藏剪贴板面板，需包含 Ctrl / Shift / Alt / Win 中至少一个修饰键。</p>
-      </section>
+      <nav class="tabs">
+        <button class="tab active" data-tab="general">常规</button>
+        <button class="tab" data-tab="appearance">外观</button>
+        <button class="tab" data-tab="rules">记录规则</button>
+        <button class="tab" data-tab="database">数据库</button>
+        <button class="tab" data-tab="delete">删除管理</button>
+      </nav>
 
-      <section class="card">
-        <h2>启动</h2>
-        <label class="check"><input id="autostart" type="checkbox" /> 开机自动启动</label>
-        <label class="check"><input id="silent-start" type="checkbox" /> 静默启动（启动时不弹出面板）</label>
-      </section>
-
-      <section class="card">
-        <h2>数据库</h2>
-        <div class="row">
-          <input id="db-dir" type="text" placeholder="默认：程序所在目录" />
-          <button id="db-browse" class="btn">选择目录…</button>
-          <button id="db-default" class="btn">恢复默认</button>
-        </div>
-        <p class="desc">数据库文件为所选目录下的 lscopy.db。切换目录后将使用新目录下的库，旧库文件保留不删除。</p>
-        <div class="row">
-          <button id="btn-export" class="btn">导出记录…</button>
-          <button id="btn-import" class="btn">导入记录…</button>
-        </div>
-      </section>
-
-      <section class="card">
-        <h2>外观</h2>
-        <div class="row">
-          <label class="field">主题
-            <select id="theme">
-              <option value="dark">深色</option>
-              <option value="light">浅色</option>
-            </select>
-          </label>
-          <label class="field">字号
-            <input id="font-size" type="number" min="10" max="24" />
-          </label>
-        </div>
-        <label class="field full">字体（点击展开系统字体列表，可输入搜索）
-          <div class="font-picker">
-            <input id="font-family" type="text" placeholder="点击选择或输入搜索字体..." autocomplete="off" />
-            <div id="font-dropdown" class="font-dropdown"></div>
+      <!-- 常规 -->
+      <div class="tab-panel" id="tab-general">
+        <section class="card">
+          <h2>全局快捷键</h2>
+          <div class="row">
+            <input id="hotkey" type="text" readonly placeholder="点击此处，然后按下组合键" />
+            <button id="hotkey-reset" class="btn">恢复默认 Ctrl+`</button>
           </div>
-        </label>
-      </section>
+          <p class="desc">用于呼出/隐藏剪贴板面板，需包含 Ctrl / Shift / Alt / Win 中至少一个修饰键。</p>
+        </section>
 
-      <section class="card">
-        <h2>记录规则</h2>
-        <label class="field">最多保留条数（超出后自动删除最旧的非置顶记录）
-          <input id="max-items" type="number" min="10" max="100000" />
-        </label>
-        <label class="field full">不记录以下程序中的复制（每行一个 exe 名，例如 KeePass.exe）
-          <textarea id="exclude-apps" rows="4" placeholder="KeePass.exe&#10;1Password.exe"></textarea>
-        </label>
-      </section>
+        <section class="card">
+          <h2>启动</h2>
+          <label class="check"><input id="autostart" type="checkbox" /> 开机自动启动</label>
+          <label class="check"><input id="silent-start" type="checkbox" /> 静默启动（启动时不弹出面板）</label>
+        </section>
+      </div>
 
-      <section class="card">
-        <h2>数据库信息 <button id="db-info-refresh" class="btn small">刷新</button></h2>
-        <div id="db-info" class="db-info">加载中…</div>
-      </section>
+      <!-- 外观 -->
+      <div class="tab-panel" id="tab-appearance" hidden>
+        <section class="card">
+          <h2>外观</h2>
+          <div class="row">
+            <label class="field">主题
+              <select id="theme">
+                <option value="dark">深色</option>
+                <option value="light">浅色</option>
+              </select>
+            </label>
+            <label class="field">字号
+              <input id="font-size" type="number" min="10" max="24" />
+            </label>
+          </div>
+          <label class="field full">字体（点击展开系统字体列表，可输入搜索）
+            <div class="font-picker">
+              <input id="font-family" type="text" placeholder="点击选择或输入搜索字体..." autocomplete="off" />
+              <div id="font-dropdown" class="font-dropdown"></div>
+            </div>
+          </label>
+        </section>
+      </div>
+
+      <!-- 记录规则 -->
+      <div class="tab-panel" id="tab-rules" hidden>
+        <section class="card">
+          <h2>记录规则</h2>
+          <label class="field">最多保留条数（超出后自动删除最旧的非置顶记录）
+            <input id="max-items" type="number" min="10" max="100000" />
+          </label>
+          <label class="field">数据保留时长（0 = 永久保留，到期自动删除，置顶不受影响）
+            <div class="row inline-row">
+              <input id="retention-value" type="number" min="0" max="9999" />
+              <select id="retention-unit">
+                <option value="hours">小时</option>
+                <option value="days">天</option>
+                <option value="months">月</option>
+                <option value="years">年</option>
+              </select>
+            </div>
+          </label>
+          <label class="field full">不记录以下程序中的复制（每行一个 exe 名，例如 KeePass.exe）
+            <textarea id="exclude-apps" rows="4" placeholder="KeePass.exe&#10;1Password.exe"></textarea>
+          </label>
+        </section>
+      </div>
+
+      <!-- 数据库 -->
+      <div class="tab-panel" id="tab-database" hidden>
+        <section class="card">
+          <h2>数据库</h2>
+          <div class="row">
+            <input id="db-dir" type="text" placeholder="默认：程序所在目录" />
+            <button id="db-browse" class="btn">选择目录…</button>
+            <button id="db-default" class="btn">恢复默认</button>
+          </div>
+          <p class="desc">数据库文件为所选目录下的 lscopy.db。切换目录后将使用新目录下的库，旧库文件保留不删除。</p>
+          <div class="row">
+            <button id="btn-export" class="btn">导出记录…</button>
+            <button id="btn-import" class="btn">导入记录…</button>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>数据库信息 <button id="db-info-refresh" class="btn small">刷新</button></h2>
+          <div id="db-info" class="db-info">加载中…</div>
+        </section>
+      </div>
+
+      <!-- 删除管理 -->
+      <div class="tab-panel" id="tab-delete" hidden>
+        <section class="card">
+          <h2>批量删除</h2>
+          <div class="row">
+            <button class="btn" data-range="1h">最近 1 小时</button>
+            <button class="btn" data-range="today">今天</button>
+            <button class="btn" data-range="7d">最近 7 天</button>
+            <button class="btn" data-range="30d">最近 30 天</button>
+            <button class="btn danger" data-range="all">清空全部</button>
+          </div>
+          <p class="desc">范围内有置顶记录时会先询问是否一并删除。</p>
+        </section>
+
+        <section class="card">
+          <h2>按时间区间删除</h2>
+          <label class="field">开始时间
+            <input id="del-start" type="datetime-local" step="1" />
+          </label>
+          <label class="field">结束时间
+            <input id="del-end" type="datetime-local" step="1" />
+          </label>
+          <div class="row">
+            <button id="btn-del-between" class="btn danger">删除该区间记录</button>
+          </div>
+          <p class="desc" id="del-result"></p>
+        </section>
+      </div>
 
       <footer class="settings-footer">
         <span id="save-msg" class="save-msg"></span>
