@@ -16,6 +16,7 @@ use tauri::{
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
+use tauri_plugin_opener::OpenerExt;
 
 // ---------- 配置 ----------
 
@@ -69,11 +70,37 @@ fn save_config_file(path: &PathBuf, cfg: &AppConfig) -> Result<(), String> {
 #[derive(Serialize, Clone)]
 struct Clip {
     id: i64,
-    kind: String,              // "text" | "image"
-    preview: String,           // 文字截断预览 / "[图片 WxH]"
+    kind: String,              // "text" | "image" | "file"
+    preview: String,           // 文字截断预览 / "[图片 WxH]" / "📄 文件名"
     image_b64: Option<String>, // 图片的 PNG base64
+    url: Option<String>,       // 内容中的第一个网址
     pinned: bool,
     created_at: i64,           // 秒级时间戳
+}
+
+// 提取文本中的第一个 http(s) 网址
+fn first_url(text: &str) -> Option<String> {
+    let mut best: Option<(usize, usize)> = None; // (起始位置, 协议长度)
+    for pat in ["https://", "http://"] {
+        if let Some(pos) = text.find(pat) {
+            if best.map_or(true, |(b, _)| pos < b) {
+                best = Some((pos, pat.len()));
+            }
+        }
+    }
+    let (pos, _) = best?;
+    let rest = &text[pos..];
+    let end = rest
+        .find(|c: char| {
+            c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | ')' | ']' | '）' | '】')
+        })
+        .unwrap_or(rest.len());
+    let url = rest[..end].trim_end_matches(['.', ',', ';', '!', '?', '。', '，', '；']);
+    if url.len() > 8 {
+        Some(url.to_string())
+    } else {
+        None
+    }
 }
 
 #[derive(Serialize)]
@@ -212,6 +239,60 @@ fn foreground_exe_name() -> Option<String> {
     None
 }
 
+// 读取剪贴板中的文件列表（资源管理器里复制的文件/文件夹，CF_HDROP）
+#[cfg(target_family = "windows")]
+fn clipboard_files() -> Option<Vec<String>> {
+    use std::os::windows::ffi::OsStringExt;
+    const CF_HDROP: u32 = 15;
+    type Handle = *mut std::ffi::c_void;
+    extern "system" {
+        fn OpenClipboard(hwnd: Handle) -> i32;
+        fn CloseClipboard() -> i32;
+        fn GetClipboardData(fmt: u32) -> Handle;
+        fn IsClipboardFormatAvailable(fmt: u32) -> i32;
+        fn DragQueryFileW(hdrop: Handle, idx: u32, buf: *mut u16, len: u32) -> u32;
+        fn GlobalLock(h: Handle) -> Handle;
+        fn GlobalUnlock(h: Handle) -> i32;
+    }
+    unsafe {
+        if IsClipboardFormatAvailable(CF_HDROP) == 0 {
+            return None;
+        }
+        if OpenClipboard(std::ptr::null_mut()) == 0 {
+            return None;
+        }
+        let mut result = Vec::new();
+        let h = GetClipboardData(CF_HDROP);
+        if !h.is_null() {
+            let hdrop = GlobalLock(h);
+            if !hdrop.is_null() {
+                let count = DragQueryFileW(hdrop, 0xFFFFFFFF, std::ptr::null_mut(), 0);
+                for i in 0..count {
+                    let len = DragQueryFileW(hdrop, i, std::ptr::null_mut(), 0);
+                    let mut buf = vec![0u16; (len + 1) as usize];
+                    let got = DragQueryFileW(hdrop, i, buf.as_mut_ptr(), len + 1);
+                    if got > 0 {
+                        buf.truncate(got as usize);
+                        result.push(std::ffi::OsString::from_wide(&buf).to_string_lossy().to_string());
+                    }
+                }
+                GlobalUnlock(h);
+            }
+        }
+        CloseClipboard();
+        if result.is_empty() {
+            None
+        } else {
+            Some(result)
+        }
+    }
+}
+
+#[cfg(not(target_family = "windows"))]
+fn clipboard_files() -> Option<Vec<String>> {
+    None
+}
+
 fn is_excluded(cfg: &AppConfig) -> bool {
     if cfg.exclude_apps.is_empty() {
         return false;
@@ -279,6 +360,23 @@ fn start_watcher(app: AppHandle) {
                         }
                     }
                 }
+                continue;
+            }
+            // 资源管理器里复制的文件/文件夹（视频等）
+            if let Some(files) = clipboard_files() {
+                let joined = files.join("\n");
+                let h = hash_bytes(joined.as_bytes());
+                let mut last = state.last_hash.lock().unwrap();
+                if *last != h {
+                    *last = h;
+                    let db = state.db.lock().unwrap();
+                    let _ = db.execute(
+                        "INSERT INTO clips(kind, content, created_at) VALUES('file', ?1, ?2)",
+                        params![joined, now_secs()],
+                    );
+                    prune(&db, max_items);
+                    let _ = app.emit("clip-added", ());
+                }
             }
         }
     });
@@ -312,11 +410,30 @@ fn list_clips(state: State<AppState>, keyword: Option<String>) -> Vec<Clip> {
         let img: Option<Vec<u8>> = row.get(3)?;
         let w: Option<u32> = row.get(4)?;
         let h: Option<u32> = row.get(5)?;
+        let url = content.as_deref().and_then(first_url);
         let (preview, image_b64) = if kind == "image" {
             (
                 format!("[图片 {}x{}]", w.unwrap_or(0), h.unwrap_or(0)),
                 img.map(|b| B64.encode(b)),
             )
+        } else if kind == "file" {
+            // content 为换行分隔的文件路径列表
+            let paths: Vec<&str> = content
+                .as_deref()
+                .unwrap_or("")
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .collect();
+            let first = paths
+                .first()
+                .and_then(|p| p.rsplit(['\\', '/']).next())
+                .unwrap_or("文件");
+            let preview = if paths.len() > 1 {
+                format!("📄 {} 等 {} 个文件", first, paths.len())
+            } else {
+                format!("📄 {}", first)
+            };
+            (preview, None)
         } else {
             let t = content.unwrap_or_default();
             let preview: String = t.chars().take(300).collect();
@@ -327,6 +444,7 @@ fn list_clips(state: State<AppState>, keyword: Option<String>) -> Vec<Clip> {
             kind,
             preview,
             image_b64,
+            url,
             pinned: row.get::<_, i64>(6)? != 0,
             created_at: row.get(7)?,
         })
@@ -466,6 +584,63 @@ fn delete_clip(state: State<AppState>, id: i64) -> Result<(), String> {
     db.execute("DELETE FROM clips WHERE id=?1", params![id])
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[tauri::command]
+fn open_clip_with_system(
+    state: State<AppState>,
+    app: AppHandle,
+    id: i64,
+) -> Result<(), String> {
+    let (kind, content, img) = {
+        let db = state.db.lock().unwrap();
+        db.query_row(
+            "SELECT kind, content, image FROM clips WHERE id=?1",
+            params![id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<Vec<u8>>>(2)?,
+                ))
+            },
+        )
+        .map_err(|e| e.to_string())?
+    };
+
+    // 文字和图片先落盘到临时目录，文件直接用原路径
+    let path = match kind.as_str() {
+        "image" => {
+            let dir = std::env::temp_dir().join("lscopy");
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            let p = dir.join(format!("clip_{id}.png"));
+            std::fs::write(&p, img.ok_or("图片数据为空")?).map_err(|e| e.to_string())?;
+            p
+        }
+        "file" => {
+            let first = content
+                .unwrap_or_default()
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .ok_or("文件路径为空")?
+                .to_string();
+            PathBuf::from(first)
+        }
+        _ => {
+            let dir = std::env::temp_dir().join("lscopy");
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            let p = dir.join(format!("clip_{id}.txt"));
+            std::fs::write(&p, content.unwrap_or_default()).map_err(|e| e.to_string())?;
+            p
+        }
+    };
+
+    if !path.exists() {
+        return Err(format!("文件不存在: {}", path.display()));
+    }
+    app.opener()
+        .open_path(path.to_string_lossy().to_string(), None::<&str>)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -914,7 +1089,8 @@ pub fn run() {
             export_clips,
             import_clips,
             open_settings,
-            list_system_fonts
+            list_system_fonts,
+            open_clip_with_system
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

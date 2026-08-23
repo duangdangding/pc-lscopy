@@ -1,13 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { applyAppearance, AppConfig, loadConfig } from "./config";
 
 interface Clip {
   id: number;
-  kind: string; // "text" | "image"
+  kind: string; // "text" | "image" | "file"
   preview: string;
   image_b64: string | null;
+  url: string | null;
   pinned: boolean;
   created_at: number; // 秒
 }
@@ -91,6 +93,41 @@ async function refresh(keepSelection = false) {
     const actions = document.createElement("span");
     actions.className = "clip-actions";
 
+    // 内容含网址时显示浏览器按钮，点击打开第一个网址
+    if (c.url) {
+      const web = document.createElement("button");
+      web.className = "clip-web";
+      web.textContent = "🌐";
+      web.title = `用默认浏览器打开: ${c.url}`;
+      web.onclick = async (e) => {
+        e.stopPropagation();
+        try {
+          await openUrl(c.url!);
+        } catch (err) {
+          alert(`打开网址失败: ${err}`);
+        }
+      };
+      actions.appendChild(web);
+    }
+
+    const view = document.createElement("button");
+    view.className = "clip-view";
+    view.textContent = "👁";
+    view.title =
+      c.kind === "image"
+        ? "用看图软件打开"
+        : c.kind === "file"
+          ? "用系统默认应用打开"
+          : "用记事本打开全文";
+    view.onclick = async (e) => {
+      e.stopPropagation();
+      try {
+        await invoke("open_clip_with_system", { id: c.id });
+      } catch (err) {
+        alert(`打开失败: ${err}`);
+      }
+    };
+
     const pin = document.createElement("button");
     pin.className = "clip-pin" + (c.pinned ? " active" : "");
     pin.textContent = "📌";
@@ -113,6 +150,7 @@ async function refresh(keepSelection = false) {
       refresh(true);
     };
 
+    actions.appendChild(view);
     actions.appendChild(pin);
     actions.appendChild(del);
     meta.appendChild(left);

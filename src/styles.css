@@ -168,7 +168,9 @@ body {
 }
 
 .clip-del,
-.clip-pin {
+.clip-pin,
+.clip-view,
+.clip-web {
   background: none;
   border: none;
   color: var(--text-dim);
@@ -176,6 +178,12 @@ body {
   font-size: 12px;
   padding: 2px 6px;
   border-radius: 4px;
+}
+
+.clip-view:hover,
+.clip-web:hover {
+  color: var(--accent);
+  background: rgba(79, 140, 255, 0.12);
 }
 
 .clip-pin {
