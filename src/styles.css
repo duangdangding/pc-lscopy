@@ -169,20 +169,25 @@ body {
 
 .clip-thumb {
   max-width: 100%;
-  max-height: 140px;
+  height: 64px;
   border-radius: 6px;
-  object-fit: contain;
+  object-fit: cover;
+  object-position: top;
   background: #000;
+  display: block;
 }
 
 .clip-thumb-placeholder {
   border: 1px dashed rgba(255, 255, 255, 0.18);
   border-radius: 6px;
-  padding: 14px 12px;
-  text-align: center;
+  height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   color: var(--text-dim);
   font-size: 12px;
   background: rgba(255, 255, 255, 0.03);
+  box-sizing: border-box;
 }
 
 .clip-meta {
