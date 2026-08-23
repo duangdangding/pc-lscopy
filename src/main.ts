@@ -25,6 +25,63 @@ let clips: Clip[] = [];
 let selected = 0;
 let config: AppConfig | null = null;
 
+// ---------- 应用内确认弹窗（不用 window.confirm：Tauri 2 中它异步且无权限） ----------
+function confirmDialog(message: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "confirm-overlay";
+
+    const box = document.createElement("div");
+    box.className = "confirm-box";
+
+    const msg = document.createElement("div");
+    msg.className = "confirm-msg";
+    msg.textContent = message;
+
+    const btns = document.createElement("div");
+    btns.className = "confirm-btns";
+
+    const cancel = document.createElement("button");
+    cancel.className = "btn";
+    cancel.textContent = "取消";
+
+    const ok = document.createElement("button");
+    ok.className = "btn primary";
+    ok.textContent = "确定";
+
+    const done = (v: boolean) => {
+      overlay.remove();
+      document.removeEventListener("keydown", onKey, true);
+      resolve(v);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Enter") {
+        e.stopPropagation();
+        e.preventDefault();
+        done(true);
+      } else if (e.key === "Escape") {
+        e.stopPropagation();
+        e.preventDefault();
+        done(false);
+      }
+    };
+    cancel.onclick = () => done(false);
+    ok.onclick = () => done(true);
+    overlay.onclick = (e) => {
+      if (e.target === overlay) done(false);
+    };
+    document.addEventListener("keydown", onKey, true);
+
+    btns.appendChild(cancel);
+    btns.appendChild(ok);
+    box.appendChild(msg);
+    box.appendChild(btns);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    ok.focus();
+  });
+}
+
 function fmtTime(ts: number): string {
   const d = new Date(ts * 1000);
   const now = new Date();
@@ -145,7 +202,7 @@ async function refresh(keepSelection = false) {
     del.onclick = async (e) => {
       e.stopPropagation();
       // 置顶内容删除前确认
-      if (c.pinned && !confirm("该记录已置顶，确定一并删除吗？")) return;
+      if (c.pinned && !(await confirmDialog("该记录已置顶，确定一并删除吗？"))) return;
       await invoke("delete_clip", { id: c.id });
       refresh(true);
     };
@@ -211,11 +268,11 @@ document.querySelectorAll<HTMLButtonElement>(".del-group button").forEach((btn) 
     const pinnedCount = await invoke<number>("count_pinned_in_range", { range });
     let includePinned = false;
     if (pinnedCount > 0) {
-      includePinned = confirm(
+      includePinned = await confirmDialog(
         `该范围内有 ${pinnedCount} 条置顶记录。\n「确定」= 连同置顶内容一起删除\n「取消」= 只删除非置顶记录`
       );
     } else if (range === "all") {
-      if (!confirm("确定清空全部剪贴板记录？")) return;
+      if (!(await confirmDialog("确定清空全部剪贴板记录？"))) return;
     }
     await invoke("delete_range", { range, includePinned });
     refresh();

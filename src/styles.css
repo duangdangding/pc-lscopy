@@ -260,6 +260,40 @@ body {
   font-size: 11px;
 }
 
+/* ---------- 应用内确认弹窗 ---------- */
+
+.confirm-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.confirm-box {
+  background: var(--bg-item);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  width: 320px;
+  max-width: calc(100vw - 48px);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+}
+
+.confirm-msg {
+  white-space: pre-wrap;
+  line-height: 1.6;
+  margin-bottom: 14px;
+}
+
+.confirm-btns {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 /* ---------- 设置页 ---------- */
 
 .settings-body {
