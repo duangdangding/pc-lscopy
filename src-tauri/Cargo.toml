@@ -31,5 +31,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 base64 = "0.22"
 enigo = "0.2"
+
+[target.'cfg(windows)'.dependencies]
 winreg = "0.52"
 
