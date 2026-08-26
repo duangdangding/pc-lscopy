@@ -59,6 +59,8 @@ body {
   align-items: center;
   background: color-mix(in srgb, var(--bg-item) 45%, transparent);
   backdrop-filter: blur(8px);
+  /* 无边框窗口：工具栏空白处可拖动（子元素自带 text/pointer 光标覆盖） */
+  cursor: move;
 }
 
 #search {
@@ -93,6 +95,13 @@ body {
   border-color: var(--accent);
 }
 
+/* 钉住按钮激活态 */
+.icon-btn.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-item));
+}
+
 .record-switch {
   display: flex;
   align-items: center;
@@ -124,7 +133,8 @@ body {
 .clip-list {
   flex: 1;
   overflow-y: auto;
-  padding: 10px;
+  /* 右侧留出 6px 给窗口缩放手柄，避免挡住滚动条 */
+  padding: 10px 16px 10px 10px;
 }
 
 .clip-list::-webkit-scrollbar {
@@ -306,6 +316,8 @@ body {
   border-top: 1px solid var(--border);
   padding: 7px 10px;
   background: color-mix(in srgb, var(--bg-item) 45%, transparent);
+  /* 底栏同样作为拖动区域 */
+  cursor: move;
 }
 
 .hint {
@@ -313,6 +325,42 @@ body {
   font-size: 11px;
   text-align: center;
   letter-spacing: 0.2px;
+}
+
+/* ---------- 窗口缩放手柄 ---------- */
+
+.resize-handle {
+  position: fixed;
+  z-index: 200;
+}
+
+.rh-e {
+  top: 0;
+  right: 0;
+  width: 6px;
+  height: 100%;
+  cursor: ew-resize;
+}
+
+.rh-s {
+  left: 0;
+  bottom: 0;
+  width: 100%;
+  height: 6px;
+  cursor: ns-resize;
+}
+
+.rh-se {
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
+  /* 右下角斜纹抓手 */
+  background: linear-gradient(135deg,
+    transparent 55%, var(--border) 55%, var(--border) 65%,
+    transparent 65%, transparent 75%, var(--border) 75%, var(--border) 85%,
+    transparent 85%);
 }
 
 /* ---------- 应用内确认弹窗 ---------- */

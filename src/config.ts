@@ -13,6 +13,9 @@ export interface AppConfig {
   retention_value: number; // 数据保留时长数值，0 = 永久保留
   retention_unit: string; // "hours" | "days" | "months" | "years"
   enabled: boolean; // 是否开启剪贴板记录
+  remember_size: boolean; // 记住窗口大小
+  window_width: number; // 记住的窗口宽度（物理像素）
+  window_height: number; // 记住的窗口高度（物理像素）
 }
 
 export async function loadConfig(): Promise<AppConfig> {

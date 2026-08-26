@@ -10,6 +10,7 @@
     "core:window:allow-show",
     "core:window:allow-set-focus",
     "core:window:allow-close",
+    "core:window:allow-start-resize-dragging",
     "dialog:default",
     "dialog:allow-open",
     "dialog:allow-save"

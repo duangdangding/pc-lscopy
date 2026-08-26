@@ -97,8 +97,56 @@ function fmtTime(ts: number): string {
 
 function updateHint() {
   const hk = config?.hotkey || "Ctrl+`";
-  hintEl.textContent = `↑↓ 选择 · Enter 粘贴 · Esc 关闭 · 右键仅复制 · ${hk} 呼出/隐藏`;
+  hintEl.textContent = panelPinned
+    ? `📌 已钉住 · Enter 粘贴不隐藏 · Esc 关闭 · ${hk} 呼出/隐藏`
+    : `↑↓ 选择 · Enter 粘贴 · Esc 关闭 · 右键仅复制 · ${hk} 呼出/隐藏`;
 }
+
+// ---------- 面板钉住：钉住后失焦/粘贴都不自动隐藏 ----------
+const pinBtn = document.querySelector<HTMLButtonElement>("#btn-pin")!;
+let panelPinned = false;
+
+function applyPinState() {
+  pinBtn.classList.toggle("active", panelPinned);
+  pinBtn.title = panelPinned
+    ? "取消钉住（恢复失焦自动隐藏）"
+    : "钉在桌面上（失焦不自动隐藏）";
+  updateHint();
+}
+
+pinBtn.onclick = async () => {
+  panelPinned = !panelPinned;
+  await invoke("set_panel_pinned", { pinned: panelPinned });
+  applyPinState();
+};
+
+// ---------- 无边框窗口拖动：工具栏/底栏空白处按住左键拖动 ----------
+function enableDrag(el: HTMLElement) {
+  el.addEventListener("mousedown", (e) => {
+    if (e.button !== 0) return;
+    const t = e.target as HTMLElement;
+    // 输入框、按钮、开关等交互元素上不触发拖动
+    if (t.closest("input, button, label, select, textarea, a")) return;
+    e.preventDefault();
+    // 走后端命令：拖动期间置 dragging 标记，防止瞬时失焦把面板隐藏
+    invoke("start_drag");
+  });
+}
+enableDrag(document.querySelector<HTMLElement>(".toolbar")!);
+enableDrag(document.querySelector<HTMLElement>(".footer")!);
+
+// ---------- 窗口缩放：拖右缘/下缘/右下角调整长宽 ----------
+document.querySelectorAll<HTMLElement>(".resize-handle").forEach((el) => {
+  el.addEventListener("mousedown", (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const dir = (el.dataset.dir || "SouthEast") as
+      | "East"
+      | "South"
+      | "SouthEast";
+    getCurrentWindow().startResizeDragging(dir);
+  });
+});
 
 function applySelection() {
   const items = listEl.querySelectorAll<HTMLDivElement>(".clip-item");
@@ -295,7 +343,8 @@ listen<AppConfig>("config-changed", (e) => {
 (async () => {
   config = await loadConfig();
   applyAppearance(config);
-  updateHint();
+  panelPinned = await invoke<boolean>("get_panel_pinned");
+  applyPinState();
   toggleEnabledEl.checked = config.enabled;
   refresh();
 })();

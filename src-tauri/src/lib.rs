@@ -36,6 +36,9 @@ pub struct AppConfig {
     pub retention_value: u32,    // 数据保留时长数值，0 = 永久保留
     pub retention_unit: String,  // "hours" | "days" | "months" | "years"
     pub enabled: bool,           // 是否开启剪贴板记录
+    pub remember_size: bool,     // 记住窗口大小（重启后恢复上次长宽）
+    pub window_width: u32,       // 记住的窗口宽度（物理像素）
+    pub window_height: u32,      // 记住的窗口高度（物理像素）
 }
 
 impl Default for AppConfig {
@@ -53,6 +56,9 @@ impl Default for AppConfig {
             retention_value: 0,
             retention_unit: "days".into(),
             enabled: true,
+            remember_size: false,
+            window_width: 420,
+            window_height: 640,
         }
     }
 }
@@ -179,6 +185,14 @@ struct AppState {
     paste_running: AtomicBool,
     // 面板弹出前的前台窗口，粘贴后把焦点还给它
     prev_hwnd: Mutex<isize>,
+    // 面板钉住状态：钉住后失焦/粘贴都不自动隐藏（会话内有效，不持久化）
+    panel_pinned: AtomicBool,
+    // 拖动/缩放进行中：系统模态拖动会造成瞬时失焦，此时不自动隐藏
+    dragging: AtomicBool,
+    // 主窗口当前是否有焦点（失焦延迟复查用）
+    main_focused: AtomicBool,
+    // 调整后待落盘的窗口尺寸（Resize 事件频繁，由监听线程统一保存）
+    pending_size: Mutex<Option<(u32, u32)>>,
 }
 
 fn now_secs() -> i64 {
@@ -194,13 +208,18 @@ fn hash_bytes(data: &[u8]) -> u64 {
     h.finish()
 }
 
+// 软件所在目录（配置文件/数据库默认都放这里，便携模式）
+fn exe_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
 fn effective_db_path(cfg: &AppConfig) -> PathBuf {
     let dir = match &cfg.db_dir {
         Some(d) if !d.trim().is_empty() => PathBuf::from(d),
-        _ => std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-            .unwrap_or_else(|| PathBuf::from(".")),
+        _ => exe_dir(),
     };
     dir.join("lscopy.db")
 }
@@ -815,6 +834,19 @@ fn start_watcher(app: AppHandle) {
             std::thread::sleep(Duration::from_millis(600));
             let state = app.state::<AppState>();
 
+            // 窗口尺寸落盘：Resize 事件只暂存，这里统一保存（天然去抖）
+            {
+                let mut pending = state.pending_size.lock().unwrap();
+                if let Some((w, h)) = pending.take() {
+                    let mut cfg = state.config.lock().unwrap();
+                    if cfg.remember_size {
+                        cfg.window_width = w;
+                        cfg.window_height = h;
+                        let _ = save_config_file(&state.config_file, &cfg);
+                    }
+                }
+            }
+
             let (enabled, excluded, max_items) = {
                 let cfg = state.config.lock().unwrap();
                 // 每轮顺便执行保留时长清理（删除过期的非置顶记录）
@@ -1068,10 +1100,61 @@ fn simulate_paste() {
 }
 
 #[tauri::command]
+fn set_panel_pinned(state: State<AppState>, pinned: bool) {
+    state.panel_pinned.store(pinned, Ordering::SeqCst);
+}
+
+#[tauri::command]
+fn get_panel_pinned(state: State<AppState>) -> bool {
+    state.panel_pinned.load(Ordering::SeqCst)
+}
+
+// 开始拖动面板：置 dragging 标记，拖动造成的瞬时失焦不触发自动隐藏
+#[tauri::command]
+fn start_drag(app: AppHandle) {
+    let Some(win) = app.get_webview_window("main") else {
+        return;
+    };
+    app.state::<AppState>().dragging.store(true, Ordering::SeqCst);
+    let _ = win.start_dragging();
+    // 拖动是系统模态循环，前端收不到 mouseup，后端轮询左键松开后清除标记
+    std::thread::spawn(move || {
+        wait_left_button_released();
+        app.state::<AppState>().dragging.store(false, Ordering::SeqCst);
+    });
+}
+
+// 等待鼠标左键松开。若 150ms 内左键已不是按下状态，视为单击（未发生拖动），直接返回
+#[cfg(target_family = "windows")]
+fn wait_left_button_released() {
+    extern "system" {
+        fn GetAsyncKeyState(vk: i32) -> i16;
+    }
+    const VK_LBUTTON: i32 = 0x01;
+    let down = || unsafe { (GetAsyncKeyState(VK_LBUTTON) as u16) & 0x8000 != 0 };
+    let mut waited = 0;
+    while !down() && waited < 150 {
+        std::thread::sleep(Duration::from_millis(10));
+        waited += 10;
+    }
+    while down() {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[cfg(not(target_family = "windows"))]
+fn wait_left_button_released() {
+    std::thread::sleep(Duration::from_secs(2));
+}
+
+#[tauri::command]
 fn paste_clip(state: State<AppState>, app: AppHandle, id: i64) -> Result<(), String> {
     // 先立刻隐藏面板：点击的第一感知是面板消失，写剪贴板/模拟按键在后台完成
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.hide();
+    // 钉住时不隐藏，方便连续粘贴多条
+    if !state.panel_pinned.load(Ordering::SeqCst) {
+        if let Some(win) = app.get_webview_window("main") {
+            let _ = win.hide();
+        }
     }
     // 剪贴板内容立即更新
     set_clipboard_by_id(&state, id)?;
@@ -1266,6 +1349,17 @@ fn get_config(state: State<AppState>) -> AppConfig {
 
 #[tauri::command]
 fn save_config(app: AppHandle, state: State<AppState>, config: AppConfig) -> Result<(), String> {
+    // 0. 开启「记住窗口大小」时，立即把当前面板实际尺寸写入配置
+    let mut config = config;
+    if config.remember_size {
+        if let Some(win) = app.get_webview_window("main") {
+            if let Ok(size) = win.inner_size() {
+                config.window_width = size.width;
+                config.window_height = size.height;
+            }
+        }
+    }
+
     // 1. 数据库目录变更：打开新库并切换（旧库文件保留不删）
     let old_dir = state.config.lock().unwrap().db_dir.clone();
     if old_dir != config.db_dir {
@@ -1651,12 +1745,19 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
-            // 配置文件固定在系统配置目录（数据库位置可在设置里改）
-            let config_file = app
-                .path()
-                .app_config_dir()
-                .map_err(|e| e.to_string())?
-                .join("lscopy-config.json");
+            // 配置文件放在软件同目录（便携模式，和数据库默认位置一致）
+            // 旧版本配置在系统配置目录：首次启动自动迁移过来
+            let config_file = exe_dir().join("lscopy-config.json");
+            if !config_file.exists() {
+                let legacy = app
+                    .path()
+                    .app_config_dir()
+                    .map_err(|e| e.to_string())?
+                    .join("lscopy-config.json");
+                if legacy.exists() {
+                    let _ = std::fs::copy(&legacy, &config_file);
+                }
+            }
             let config = load_config(&config_file);
             let db = init_db(&effective_db_path(&config))?;
             app.manage(AppState {
@@ -1669,6 +1770,10 @@ pub fn run() {
                 paste_pending: Mutex::new(false),
                 paste_running: AtomicBool::new(false),
                 prev_hwnd: Mutex::new(0),
+                panel_pinned: AtomicBool::new(false),
+                dragging: AtomicBool::new(false),
+                main_focused: AtomicBool::new(false),
+                pending_size: Mutex::new(None),
             });
 
             // 托盘
@@ -1720,14 +1825,49 @@ pub fn run() {
 
             // 主窗口：关闭改隐藏；失焦自动关闭（点其他位置即关闭）
             if let Some(win) = app.get_webview_window("main") {
+                // 记住窗口大小：启动时恢复上次尺寸（物理像素，避免 DPI 换算漂移）
+                if config.remember_size && config.window_width > 0 && config.window_height > 0 {
+                    let _ = win.set_size(tauri::PhysicalSize::new(
+                        config.window_width,
+                        config.window_height,
+                    ));
+                }
                 let w = win.clone();
                 win.on_window_event(move |event| match event {
                     WindowEvent::CloseRequested { api, .. } => {
                         api.prevent_close();
                         let _ = w.hide();
                     }
-                    WindowEvent::Focused(false) => {
-                        let _ = w.hide();
+                    WindowEvent::Resized(size) => {
+                        // 记住窗口大小开启时：暂存新尺寸，由监听线程统一落盘
+                        let state = w.state::<AppState>();
+                        if state.config.lock().unwrap().remember_size {
+                            *state.pending_size.lock().unwrap() = Some((size.width, size.height));
+                        }
+                    }
+                    WindowEvent::Focused(focused) => {
+                        let state = w.state::<AppState>();
+                        state.main_focused.store(*focused, Ordering::SeqCst);
+                        if *focused {
+                            return;
+                        }
+                        // 失焦延迟复查：拖动/缩放是系统模态操作，会造成瞬时失焦；
+                        // 等 150ms 确认仍无焦点、未钉住、未在拖动，才真正隐藏
+                        let w2 = w.clone();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(Duration::from_millis(150));
+                            let st = w2.state::<AppState>();
+                            if st.panel_pinned.load(Ordering::SeqCst) {
+                                return;
+                            }
+                            if st.dragging.load(Ordering::SeqCst) {
+                                return;
+                            }
+                            if st.main_focused.load(Ordering::SeqCst) {
+                                return;
+                            }
+                            let _ = w2.hide();
+                        });
                     }
                     _ => {}
                 });
@@ -1772,7 +1912,10 @@ pub fn run() {
             count_pinned_between,
             delete_between,
             set_enabled,
-            get_clip_image
+            get_clip_image,
+            set_panel_pinned,
+            get_panel_pinned,
+            start_drag
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

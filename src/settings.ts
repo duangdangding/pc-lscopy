@@ -11,6 +11,7 @@ const hotkeyEl = $<HTMLInputElement>("#hotkey");
 const enabledEl = $<HTMLInputElement>("#enabled");
 const autostartEl = $<HTMLInputElement>("#autostart");
 const silentStartEl = $<HTMLInputElement>("#silent-start");
+const rememberSizeEl = $<HTMLInputElement>("#remember-size");
 const dbDirEl = $<HTMLInputElement>("#db-dir");
 const themeEl = $<HTMLSelectElement>("#theme");
 const fontFamilyEl = $<HTMLInputElement>("#font-family");
@@ -201,6 +202,10 @@ $("#btn-save").addEventListener("click", async () => {
     max_items: Math.max(0, Number(maxItemsEl.value) || 0),
     retention_value: Math.max(0, Number(retentionValueEl.value) || 0),
     retention_unit: retentionUnitEl.value,
+    remember_size: rememberSizeEl.checked,
+    // 尺寸由后端在开启时抓取当前实际值，这里带上已有值兜底
+    window_width: config.window_width,
+    window_height: config.window_height,
   };
   try {
     await invoke("save_config", { config: next });
@@ -291,6 +296,7 @@ listen<AppConfig>("config-changed", (e) => {
   enabledEl.checked = config.enabled;
   autostartEl.checked = config.autostart;
   silentStartEl.checked = config.silent_start;
+  rememberSizeEl.checked = config.remember_size ?? false;
   dbDirEl.value = config.db_dir || "";
   themeEl.value = config.theme;
   fontFamilyEl.value = config.font_family;

@@ -16,6 +16,7 @@
           <span>开启记录</span>
         </label>
         <input id="search" type="text" placeholder="搜索剪贴板记录..." autocomplete="off" />
+        <button id="btn-pin" class="icon-btn" title="钉在桌面上（失焦不自动隐藏）">📌</button>
         <button id="btn-settings" class="icon-btn" title="设置">⚙</button>
       </header>
 
@@ -35,5 +36,10 @@
         <div class="hint" id="hint"></div>
       </footer>
     </div>
+
+    <!-- 窗口缩放手柄：右缘 / 下缘 / 右下角 -->
+    <div class="resize-handle rh-e" data-dir="East"></div>
+    <div class="resize-handle rh-s" data-dir="South"></div>
+    <div class="resize-handle rh-se" data-dir="SouthEast"></div>
   </body>
 </html>
