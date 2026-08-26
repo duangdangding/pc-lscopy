@@ -108,6 +108,19 @@ body {
   cursor: pointer;
 }
 
+/* ---------- 主页类型标签页 ---------- */
+
+.main-tabs {
+  padding: 0 10px;
+  margin-bottom: 0;
+  flex-shrink: 0;
+}
+
+.main-tabs .tab {
+  padding: 7px 12px;
+  font-size: calc(var(--app-font-size) - 1px);
+}
+
 .clip-list {
   flex: 1;
   overflow-y: auto;

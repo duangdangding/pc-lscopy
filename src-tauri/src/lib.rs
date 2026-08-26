@@ -74,10 +74,53 @@ fn save_config_file(path: &PathBuf, cfg: &AppConfig) -> Result<(), String> {
 
 // ---------- 数据模型 ----------
 
+// 视频文件扩展名（kind=file 时按第一个文件路径的扩展名归类）
+const VIDEO_EXTS: &[&str] = &[
+    "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "mpg", "mpeg", "ts", "m2ts",
+    "rmvb", "rm", "3gp", "f4v", "vob",
+];
+
+// 办公/文本类文件扩展名
+const OFFICE_EXTS: &[&str] = &[
+    "txt", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "csv", "pdf", "md", "rtf", "wps",
+    "et", "dps", "odt", "ods", "odp",
+];
+
+// 记录分类："text" 纯文本 | "image" 图片 | "video" 视频文件 | "office" 办公/文本文件 | "file" 其他文件
+// 文件类记录按第一个文件路径的扩展名归类（与预览显示的第一个文件一致）
+fn category_of(kind: &str, content: Option<&str>) -> &'static str {
+    match kind {
+        "text" => "text",
+        "image" => "image",
+        "file" => {
+            let first = content
+                .unwrap_or("")
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("");
+            let ext = first
+                .rsplit(['\\', '/'])
+                .next()
+                .and_then(|name| name.rsplit_once('.'))
+                .map(|(_, e)| e.to_lowercase())
+                .unwrap_or_default();
+            if VIDEO_EXTS.contains(&ext.as_str()) {
+                "video"
+            } else if OFFICE_EXTS.contains(&ext.as_str()) {
+                "office"
+            } else {
+                "file"
+            }
+        }
+        _ => "file",
+    }
+}
+
 #[derive(Serialize, Clone)]
 struct Clip {
     id: i64,
     kind: String,              // "text" | "image" | "file"
+    category: String,          // "text" | "image" | "video" | "office" | "file"
     preview: String,           // 文字截断预览 / "[图片 WxH]" / "📄 文件名"
     image_b64: Option<String>, // 图片的 PNG base64
     url: Option<String>,       // 内容中的第一个网址
@@ -573,6 +616,7 @@ fn list_clips(state: State<AppState>, keyword: Option<String>) -> Vec<Clip> {
         let w: Option<u32> = row.get(3)?;
         let h: Option<u32> = row.get(4)?;
         let url = content.as_deref().and_then(first_url);
+        let category = category_of(&kind, content.as_deref()).to_string();
         let preview = if kind == "image" {
             format!("[图片 {}x{}]", w.unwrap_or(0), h.unwrap_or(0))
         } else if kind == "file" {
@@ -598,6 +642,7 @@ fn list_clips(state: State<AppState>, keyword: Option<String>) -> Vec<Clip> {
         };
         Ok(Clip {
             id: row.get(0)?,
+            category,
             kind,
             preview,
             image_b64: None, // 列表不携带图片数据

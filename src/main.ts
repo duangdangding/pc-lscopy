@@ -8,6 +8,7 @@ import { confirmDialog } from "./confirm";
 interface Clip {
   id: number;
   kind: string; // "text" | "image" | "file"
+  category: string; // 后端分类："text" | "image" | "video" | "office" | "file"
   preview: string;
   image_b64: string | null;
   url: string | null;
@@ -19,12 +20,39 @@ const listEl = document.querySelector<HTMLDivElement>("#list")!;
 const emptyEl = document.querySelector<HTMLDivElement>("#empty")!;
 const searchEl = document.querySelector<HTMLInputElement>("#search")!;
 const hintEl = document.querySelector<HTMLDivElement>("#hint")!;
+const tabsEl = document.querySelector<HTMLElement>("#tabs")!;
 
 let keyword = "";
 let searchTimer: number | undefined;
 let clips: Clip[] = [];
 let selected = 0;
 let config: AppConfig | null = null;
+
+// ---------- 类型标签页：全部 / 图片 / 视频 / 文字 / 办公 / 其他 ----------
+// 分类由后端 category 字段给出："text" 纯文本 | "image" 图片 | "video" 视频 | "office" 办公/文本文件 | "file" 其他文件
+type TabKey = "all" | "image" | "video" | "text" | "office" | "other";
+let activeTab: TabKey = "all";
+
+function matchTab(c: Clip): boolean {
+  switch (activeTab) {
+    case "image": return c.category === "image";
+    case "text": return c.category === "text";
+    case "office": return c.category === "office";
+    case "video": return c.category === "video";
+    case "other": return c.category === "file";
+    default: return true;
+  }
+}
+
+tabsEl.querySelectorAll<HTMLButtonElement>(".tab").forEach((btn) => {
+  btn.onclick = () => {
+    if (btn.dataset.tab === activeTab) return;
+    activeTab = (btn.dataset.tab as TabKey) || "all";
+    tabsEl.querySelectorAll(".tab").forEach((t) => t.classList.remove("active"));
+    btn.classList.add("active");
+    refresh();
+  };
+});
 
 // ---------- 图片缩略图懒加载：进入可视区域才取回数据，带缓存 ----------
 const imageCache = new Map<number, string>();
@@ -81,9 +109,10 @@ function applySelection() {
 }
 
 async function refresh(keepSelection = false) {
-  clips = await invoke<Clip[]>("list_clips", {
+  const all = await invoke<Clip[]>("list_clips", {
     keyword: keyword.trim() || null,
   });
+  clips = all.filter(matchTab);
   emptyEl.style.display = clips.length ? "none" : "block";
   listEl.innerHTML = "";
   if (!keepSelection) selected = 0;
