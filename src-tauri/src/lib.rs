@@ -1069,6 +1069,10 @@ fn simulate_paste() {
 
 #[tauri::command]
 fn paste_clip(state: State<AppState>, app: AppHandle, id: i64) -> Result<(), String> {
+    // 先立刻隐藏面板：点击的第一感知是面板消失，写剪贴板/模拟按键在后台完成
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.hide();
+    }
     // 剪贴板内容立即更新
     set_clipboard_by_id(&state, id)?;
     *state.paste_pending.lock().unwrap() = true;
@@ -1093,14 +1097,13 @@ fn paste_worker(app: AppHandle) {
             }
             *p = false;
         }
-        if let Some(win) = app.get_webview_window("main") {
-            let _ = win.hide();
-        }
+        // 面板已在 paste_clip 里隐藏，这里只需把焦点还给之前的窗口
         let hwnd = *state.prev_hwnd.lock().unwrap();
         if hwnd != 0 {
             focus_hwnd(hwnd);
         }
-        std::thread::sleep(Duration::from_millis(100));
+        // 等焦点 settling 即可，50ms 在响应速度和可靠性之间比较平衡
+        std::thread::sleep(Duration::from_millis(50));
         simulate_paste();
     }
     state.paste_running.store(false, Ordering::SeqCst);
