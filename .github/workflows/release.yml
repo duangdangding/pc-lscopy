@@ -13,7 +13,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest, macos-13]
+        include:
+          - os: windows-latest
+            target: ""
+          - os: macos-latest
+            target: ""
+          # GitHub 已退役 Intel Mac 构建机（macos-13），
+          # 在 Apple Silicon 机器上交叉编译 x86_64 目标
+          - os: macos-latest
+            target: x86_64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -21,6 +29,10 @@ jobs:
       - uses: oven-sh/setup-bun@v2
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - name: Add Rust target
+        if: matrix.target != ''
+        run: rustup target add ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -38,3 +50,4 @@ jobs:
           releaseName: "lscopy ${{ github.ref_name }}"
           releaseDraft: true
           prerelease: false
+          args: ${{ matrix.target != '' && format('--target {0}', matrix.target) || '' }}
