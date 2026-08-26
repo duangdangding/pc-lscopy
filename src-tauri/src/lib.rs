@@ -338,9 +338,15 @@ fn apply_retention(db: &Connection, cfg: &AppConfig) {
 
 fn png_from_arboard(img: &arboard::ImageData) -> Option<(Vec<u8>, u32, u32)> {
     let rgba = image::RgbaImage::from_raw(img.width as u32, img.height as u32, img.bytes.to_vec())?;
+    encode_png(rgba)
+}
+
+fn encode_png(rgba: image::RgbaImage) -> Option<(Vec<u8>, u32, u32)> {
+    let w = rgba.width();
+    let h = rgba.height();
     let mut buf = std::io::Cursor::new(Vec::new());
     rgba.write_to(&mut buf, image::ImageFormat::Png).ok()?;
-    Some((buf.into_inner(), img.width as u32, img.height as u32))
+    Some((buf.into_inner(), w, h))
 }
 
 #[cfg(target_family = "windows")]
@@ -442,6 +448,301 @@ fn clipboard_files() -> Option<Vec<String>> {
     None
 }
 
+// ---------- Windows 原生图片兜底 ----------
+// 有些截图软件只写 CF_BITMAP / CF_DIB，arboard 读不到，这里直接走 Win32 取图
+
+// 按掩码提取颜色分量并扩展到 8 位
+#[cfg(target_family = "windows")]
+fn extract_masked(v: u32, mask: u32) -> u8 {
+    if mask == 0 {
+        return 0;
+    }
+    let raw = (v & mask) >> mask.trailing_zeros();
+    let max = (1u32 << mask.count_ones()) - 1;
+    ((raw * 255 + max / 2) / max) as u8
+}
+
+// 把 DIB 数据解析成 RGBA 像素（支持 16/24/32 位、BI_RGB 与 BI_BITFIELDS）
+#[cfg(target_family = "windows")]
+fn rgba_from_dib(dib: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
+    if dib.len() < 40 {
+        return None;
+    }
+    let u32_at = |off: usize| -> u32 { u32::from_le_bytes([dib[off], dib[off + 1], dib[off + 2], dib[off + 3]]) };
+    let header_size = u32_at(0) as usize;
+    // 只支持 BITMAPINFOHEADER(40) 及以上，古老的 BITMAPCOREHEADER(12) 不处理
+    if header_size < 40 || dib.len() < header_size {
+        return None;
+    }
+    let width = u32_at(4) as i32;
+    let raw_height = u32_at(8) as i32;
+    let bit_count = u16::from_le_bytes([dib[14], dib[15]]);
+    let compression = u32_at(16);
+    let clr_used = u32_at(32) as usize;
+    if width <= 0 || raw_height == 0 {
+        return None;
+    }
+    let w = width as usize;
+    let h = raw_height.unsigned_abs() as usize;
+    let top_down = raw_height < 0;
+
+    const BI_RGB: u32 = 0;
+    const BI_BITFIELDS: u32 = 3;
+
+    // 像素数据偏移 = 头 + （40 字节头的位掩码）+ 色表
+    let mut off = header_size;
+    let (mut r_mask, mut g_mask, mut b_mask) = (0u32, 0u32, 0u32);
+    if compression == BI_BITFIELDS {
+        if header_size >= 52 {
+            // BITMAPV4/V5 头：掩码在头内
+            r_mask = u32_at(40);
+            g_mask = u32_at(44);
+            b_mask = u32_at(48);
+        } else {
+            if dib.len() < off + 12 {
+                return None;
+            }
+            r_mask = u32_at(off);
+            g_mask = u32_at(off + 4);
+            b_mask = u32_at(off + 8);
+            off += 12;
+        }
+    } else if compression != BI_RGB {
+        return None; // 压缩格式（RLE/JPEG 等）不支持
+    }
+    if bit_count <= 8 {
+        let n = if clr_used > 0 { clr_used } else { 1usize << bit_count };
+        off += n * 4;
+    }
+    let bytes_pp = (bit_count / 8) as usize;
+    if bytes_pp < 2 || dib.len() < off {
+        return None;
+    }
+    let pixels = &dib[off..];
+    let stride = (w * bytes_pp + 3) & !3; // 行对齐到 4 字节
+
+    let mut rgba = vec![0u8; w * h * 4];
+    let mut any_alpha = false;
+    for y in 0..h {
+        let src_y = if top_down { y } else { h - 1 - y }; // bottom-up 翻正
+        let start = src_y * stride;
+        let end = start + w * bytes_pp;
+        if end > pixels.len() {
+            return None;
+        }
+        let row = &pixels[start..end];
+        for x in 0..w {
+            let p = &row[x * bytes_pp..];
+            let (r, g, b, a) = match bit_count {
+                32 => {
+                    if compression == BI_BITFIELDS {
+                        let v = u32::from_le_bytes([p[0], p[1], p[2], p[3]]);
+                        (
+                            extract_masked(v, r_mask),
+                            extract_masked(v, g_mask),
+                            extract_masked(v, b_mask),
+                            255,
+                        )
+                    } else {
+                        (p[2], p[1], p[0], p[3])
+                    }
+                }
+                24 => (p[2], p[1], p[0], 255),
+                16 => {
+                    let v = u16::from_le_bytes([p[0], p[1]]) as u32;
+                    // BI_RGB 的 16 位是 555，BI_BITFIELDS 按掩码（常见 565）
+                    let (rm, gm, bm) = if compression == BI_BITFIELDS {
+                        (r_mask, g_mask, b_mask)
+                    } else {
+                        (0x7C00, 0x03E0, 0x001F)
+                    };
+                    (
+                        extract_masked(v, rm),
+                        extract_masked(v, gm),
+                        extract_masked(v, bm),
+                        255,
+                    )
+                }
+                _ => return None,
+            };
+            if a != 0 {
+                any_alpha = true;
+            }
+            let o = (y * w + x) * 4;
+            rgba[o] = r;
+            rgba[o + 1] = g;
+            rgba[o + 2] = b;
+            rgba[o + 3] = a;
+        }
+    }
+    // 32 位 BI_RGB 的 alpha 通道经常是未定义的全 0，统一设为不透明
+    if !any_alpha {
+        for px in rgba.chunks_exact_mut(4) {
+            px[3] = 255;
+        }
+    }
+    Some((rgba, w as u32, h as u32))
+}
+
+// CF_BITMAP 是位图句柄而非内存块：用 GetDIBits 转成 32 位 DIB
+#[cfg(target_family = "windows")]
+fn dib_from_bitmap(hbmp: *mut std::ffi::c_void) -> Option<Vec<u8>> {
+    #[repr(C)]
+    struct Bmp {
+        bm_type: i32,
+        bm_width: i32,
+        bm_height: i32,
+        bm_width_bytes: i32,
+        bm_planes: u16,
+        bm_bits_pixel: u16,
+        bm_bits: *mut std::ffi::c_void,
+    }
+    type Handle = *mut std::ffi::c_void;
+    extern "system" {
+        fn GetObjectW(h: Handle, n: i32, v: *mut std::ffi::c_void) -> i32;
+        fn GetDC(hwnd: Handle) -> Handle;
+        fn ReleaseDC(hwnd: Handle, hdc: Handle) -> i32;
+        fn GetDIBits(hdc: Handle, hbmp: Handle, start: u32, lines: u32, bits: *mut u8, bmi: *mut u8, usage: u32) -> i32;
+    }
+    unsafe {
+        let mut b: Bmp = std::mem::zeroed();
+        if GetObjectW(hbmp, std::mem::size_of::<Bmp>() as i32, &mut b as *mut Bmp as *mut _) == 0 {
+            return None;
+        }
+        if b.bm_width <= 0 || b.bm_height == 0 {
+            return None;
+        }
+        let w = b.bm_width as usize;
+        let h = b.bm_height.unsigned_abs() as usize;
+        // BITMAPINFOHEADER(40 字节) + 32 位像素数据
+        let mut dib = vec![0u8; 40 + w * h * 4];
+        dib[0..4].copy_from_slice(&40u32.to_le_bytes());
+        dib[4..8].copy_from_slice(&b.bm_width.to_le_bytes());
+        dib[8..12].copy_from_slice(&b.bm_height.to_le_bytes()); // 保留原方向
+        dib[12..14].copy_from_slice(&1u16.to_le_bytes()); // planes
+        dib[14..16].copy_from_slice(&32u16.to_le_bytes()); // bpp
+        // compression 保持 BI_RGB(0)
+        let hdc = GetDC(std::ptr::null_mut());
+        if hdc.is_null() {
+            return None;
+        }
+        let got = GetDIBits(hdc, hbmp, 0, h as u32, dib[40..].as_mut_ptr(), dib.as_mut_ptr(), 0);
+        ReleaseDC(std::ptr::null_mut(), hdc);
+        if got == 0 {
+            return None;
+        }
+        Some(dib)
+    }
+}
+
+// arboard 读不到图片时的兜底：按 "PNG" → CF_DIBV5 → CF_DIB → CF_BITMAP 顺序取图
+#[cfg(target_family = "windows")]
+fn clipboard_image_native() -> Option<(Vec<u8>, u32, u32)> {
+    const CF_BITMAP: u32 = 2;
+    const CF_DIB: u32 = 8;
+    const CF_DIBV5: u32 = 17;
+    type Handle = *mut std::ffi::c_void;
+    extern "system" {
+        fn OpenClipboard(hwnd: Handle) -> i32;
+        fn CloseClipboard() -> i32;
+        fn GetClipboardData(fmt: u32) -> Handle;
+        fn IsClipboardFormatAvailable(fmt: u32) -> i32;
+        fn RegisterClipboardFormatW(name: *const u16) -> u32;
+        fn GlobalLock(h: Handle) -> Handle;
+        fn GlobalUnlock(h: Handle) -> i32;
+        fn GlobalSize(h: Handle) -> usize;
+    }
+    unsafe {
+        if OpenClipboard(std::ptr::null_mut()) == 0 {
+            return None;
+        }
+        let mut out: Option<(Vec<u8>, u32, u32)> = None;
+
+        // 1. "PNG" 自定义格式（QQ、浏览器等），数据本身就是 PNG 文件
+        let png_name: Vec<u16> = "PNG".encode_utf16().chain(std::iter::once(0)).collect();
+        let png_fmt = RegisterClipboardFormatW(png_name.as_ptr());
+        if png_fmt != 0 && IsClipboardFormatAvailable(png_fmt) != 0 {
+            let hnd = GetClipboardData(png_fmt);
+            if !hnd.is_null() {
+                let size = GlobalSize(hnd);
+                let p = GlobalLock(hnd);
+                if !p.is_null() && size > 8 {
+                    let bytes = std::slice::from_raw_parts(p as *const u8, size).to_vec();
+                    GlobalUnlock(hnd);
+                    if let Ok(img) = image::load_from_memory(&bytes) {
+                        out = Some((bytes, img.width(), img.height()));
+                    }
+                } else if !p.is_null() {
+                    GlobalUnlock(hnd);
+                }
+            }
+        }
+
+        // 2. DIB / DIBV5
+        if out.is_none() {
+            for fmt in [CF_DIBV5, CF_DIB] {
+                if IsClipboardFormatAvailable(fmt) == 0 {
+                    continue;
+                }
+                let hnd = GetClipboardData(fmt);
+                if hnd.is_null() {
+                    continue;
+                }
+                let size = GlobalSize(hnd);
+                let p = GlobalLock(hnd);
+                if p.is_null() || size < 40 {
+                    if !p.is_null() {
+                        GlobalUnlock(hnd);
+                    }
+                    continue;
+                }
+                let bytes = std::slice::from_raw_parts(p as *const u8, size).to_vec();
+                GlobalUnlock(hnd);
+                if let Some((rgba, w, h)) = rgba_from_dib(&bytes) {
+                    if let Some(img) = image::RgbaImage::from_raw(w, h, rgba) {
+                        out = encode_png(img);
+                    }
+                }
+                if out.is_some() {
+                    break;
+                }
+            }
+        }
+
+        // 3. CF_BITMAP（只写位图句柄的截图软件，如部分系统/第三方截图工具）
+        if out.is_none() && IsClipboardFormatAvailable(CF_BITMAP) != 0 {
+            let hbmp = GetClipboardData(CF_BITMAP); // GDI 句柄，不能 GlobalLock
+            if !hbmp.is_null() {
+                if let Some(dib) = dib_from_bitmap(hbmp) {
+                    if let Some((rgba, w, h)) = rgba_from_dib(&dib) {
+                        if let Some(img) = image::RgbaImage::from_raw(w, h, rgba) {
+                            out = encode_png(img);
+                        }
+                    }
+                }
+            }
+        }
+
+        CloseClipboard();
+        out
+    }
+}
+
+#[cfg(not(target_family = "windows"))]
+fn clipboard_image_native() -> Option<(Vec<u8>, u32, u32)> {
+    None
+}
+
+// 读取剪贴板图片：先走 arboard，读不到再用 Windows 原生兜底
+fn read_image(cb: &mut Clipboard) -> Option<(Vec<u8>, u32, u32)> {
+    if let Ok(img) = cb.get_image() {
+        if let Some(r) = png_from_arboard(&img) {
+            return Some(r);
+        }
+    }
+    clipboard_image_native()
+}
+
 fn is_excluded(cfg: &AppConfig) -> bool {
     if cfg.exclude_apps.is_empty() {
         return false;
@@ -478,13 +779,12 @@ fn read_clipboard(cb: &mut Clipboard) -> Option<Cand> {
             return Some(Cand::Text(text, h));
         }
     }
-    if let Ok(img) = cb.get_image() {
-        if let Some((png, w, hgt)) = png_from_arboard(&img) {
-            if png.len() <= 20 * 1024 * 1024 {
-                let h = hash_bytes(&png);
-                return Some(Cand::Image(png, w, hgt, h));
-            }
+    if let Some((png, w, hgt)) = read_image(cb) {
+        if png.len() <= 20 * 1024 * 1024 {
+            let h = hash_bytes(&png);
+            return Some(Cand::Image(png, w, hgt, h));
         }
+        // 图片超过 20MB 上限，放弃本轮（不再尝试文件，避免把大图路径当文件记录）
         return None;
     }
     clipboard_files().map(|files| {
