@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for the main and settings windows",
-  "windows": ["main", "settings"],
+  "windows": ["main", "settings", "blocked"],
   "permissions": [
     "core:default",
     "opener:default",

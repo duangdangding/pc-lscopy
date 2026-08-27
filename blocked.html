@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>黑名单管理 - 剪贴板管家</title>
+    <script type="module" src="/src/blocked.ts" defer></script>
+  </head>
+
+  <body class="settings-body">
+    <div class="settings-page">
+      <h1>黑名单管理</h1>
+      <section class="card">
+        <h2>已拉黑的设备 <button id="blocked-refresh" class="btn small">刷新</button></h2>
+        <p class="desc">被拉黑的设备无法扫描到本机、无法请求本机任何接口，本机也无法操作它。移出后可重新配对。</p>
+        <div id="blocked-list" class="lan-list"><p class="desc">黑名单为空</p></div>
+      </section>
+    </div>
+  </body>
+</html>

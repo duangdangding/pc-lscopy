@@ -54,3 +54,65 @@ export function confirmDialog(message: string): Promise<boolean> {
     ok.focus();
   });
 }
+
+export interface ChoiceOption {
+  /** 选项值，作为 Promise 的返回结果 */
+  value: string;
+  text: string;
+  /** 按钮样式："primary" | "danger" | ""（默认） */
+  kind?: "primary" | "danger" | "";
+}
+
+/**
+ * 多选一弹窗：返回所选选项的 value；点遮罩 / Esc / 显式「取消」类选项外关闭返回 null。
+ * 用于"连同置顶删除 / 只删非置顶 / 取消"这类三分支场景。
+ */
+export function choiceDialog(
+  message: string,
+  options: ChoiceOption[]
+): Promise<string | null> {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "confirm-overlay";
+
+    const box = document.createElement("div");
+    box.className = "confirm-box";
+
+    const msg = document.createElement("div");
+    msg.className = "confirm-msg";
+    msg.textContent = message;
+
+    const btns = document.createElement("div");
+    btns.className = "confirm-btns";
+
+    const done = (v: string | null) => {
+      overlay.remove();
+      document.removeEventListener("keydown", onKey, true);
+      resolve(v);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        e.preventDefault();
+        done(null);
+      }
+    };
+    for (const opt of options) {
+      const b = document.createElement("button");
+      b.className = `btn ${opt.kind ?? ""}`.trim();
+      b.textContent = opt.text;
+      b.onclick = () => done(opt.value);
+      btns.appendChild(b);
+    }
+    overlay.onclick = (e) => {
+      if (e.target === overlay) done(null);
+    };
+    document.addEventListener("keydown", onKey, true);
+
+    box.appendChild(msg);
+    box.appendChild(btns);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    btns.querySelector<HTMLButtonElement>("button")?.focus();
+  });
+}

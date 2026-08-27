@@ -19,6 +19,8 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
 use tauri_plugin_opener::OpenerExt;
 
+mod lan;
+
 // ---------- 配置 ----------
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -171,8 +173,8 @@ struct DbInfo {
 }
 
 struct AppState {
-    db: Mutex<Connection>,
-    config: Mutex<AppConfig>,
+    pub(crate) db: Mutex<Connection>,
+    pub(crate) config: Mutex<AppConfig>,
     config_file: PathBuf,
     // 已删除/被排除内容的哈希集合：命中即跳过，直到有新内容入库后清空
     ignored_hashes: Mutex<Vec<u64>>,
@@ -193,23 +195,25 @@ struct AppState {
     main_focused: AtomicBool,
     // 调整后待落盘的窗口尺寸（Resize 事件频繁，由监听线程统一保存）
     pending_size: Mutex<Option<(u32, u32)>>,
+    // 局域网同步模块共享状态
+    pub(crate) lan: lan::LanShared,
 }
 
-fn now_secs() -> i64 {
+pub(crate) fn now_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
 }
 
-fn hash_bytes(data: &[u8]) -> u64 {
+pub(crate) fn hash_bytes(data: &[u8]) -> u64 {
     let mut h = DefaultHasher::new();
     data.hash(&mut h);
     h.finish()
 }
 
 // 软件所在目录（配置文件/数据库默认都放这里，便携模式）
-fn exe_dir() -> PathBuf {
+pub(crate) fn exe_dir() -> PathBuf {
     std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|p| p.to_path_buf()))
@@ -257,6 +261,14 @@ fn init_db(path: &PathBuf) -> Result<Connection, String> {
     }
     conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_clips_hash ON clips(hash);")
         .map_err(|e| e.to_string())?;
+    // 旧版本库迁移：局域网同步来源追踪（环回防护用）
+    if conn.prepare("SELECT remote_device_id FROM clips LIMIT 1").is_err() {
+        conn.execute_batch(
+            "ALTER TABLE clips ADD COLUMN remote_device_id TEXT;
+             ALTER TABLE clips ADD COLUMN remote_id INTEGER;",
+        )
+        .map_err(|e| e.to_string())?;
+    }
     Ok(conn)
 }
 
@@ -360,7 +372,7 @@ fn png_from_arboard(img: &arboard::ImageData) -> Option<(Vec<u8>, u32, u32)> {
     encode_png(rgba)
 }
 
-fn encode_png(rgba: image::RgbaImage) -> Option<(Vec<u8>, u32, u32)> {
+pub(crate) fn encode_png(rgba: image::RgbaImage) -> Option<(Vec<u8>, u32, u32)> {
     let w = rgba.width();
     let h = rgba.height();
     let mut buf = std::io::Cursor::new(Vec::new());
@@ -1558,6 +1570,15 @@ fn open_settings(app: AppHandle) {
     }
 }
 
+// 打开黑名单管理窗口
+#[tauri::command]
+fn open_blocked(app: AppHandle) {
+    if let Some(w) = app.get_webview_window("blocked") {
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+}
+
 // 本地 UTC 偏移（秒），用于"今天"的零点计算
 fn local_utc_offset(_now: i64) -> i64 {
     #[cfg(target_family = "windows")]
@@ -1760,6 +1781,9 @@ pub fn run() {
             }
             let config = load_config(&config_file);
             let db = init_db(&effective_db_path(&config))?;
+            // 局域网同步：加载持久化状态（首次启动自动生成设备标识/名称/配对码）
+            let lan_file = lan::settings_file();
+            let lan_settings = lan::load_settings(&lan_file);
             app.manage(AppState {
                 db: Mutex::new(db),
                 config: Mutex::new(config.clone()),
@@ -1774,6 +1798,7 @@ pub fn run() {
                 dragging: AtomicBool::new(false),
                 main_focused: AtomicBool::new(false),
                 pending_size: Mutex::new(None),
+                lan: lan::LanShared::new(lan_file, lan_settings),
             });
 
             // 托盘
@@ -1889,8 +1914,21 @@ pub fn run() {
                 });
             }
 
+            // 黑名单窗口：关闭改隐藏
+            if let Some(win) = app.get_webview_window("blocked") {
+                let w = win.clone();
+                win.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = w.hide();
+                    }
+                });
+            }
+
             // 启动剪贴板监听线程
             start_watcher(app.handle().clone());
+            // 启动局域网同步模块（beacon 收发 + 自动同步，按开关启停 HTTP 服务）
+            lan::start(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1907,6 +1945,7 @@ pub fn run() {
             export_clips,
             import_clips,
             open_settings,
+            open_blocked,
             list_system_fonts,
             open_clip_with_system,
             count_pinned_between,
@@ -1915,7 +1954,18 @@ pub fn run() {
             get_clip_image,
             set_panel_pinned,
             get_panel_pinned,
-            start_drag
+            start_drag,
+            lan::lan_get_state,
+            lan::lan_update_settings,
+            lan::lan_regenerate_token,
+            lan::lan_add_device,
+            lan::lan_sweep,
+            lan::lan_pair,
+            lan::lan_unpair,
+            lan::lan_sync_now,
+            lan::lan_block,
+            lan::lan_unblock,
+            lan::lan_respond_pair
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

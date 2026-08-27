@@ -26,3 +26,9 @@ dist-ssr
 # Tauri / Rust
 src-tauri/target/
 src-tauri/gen/schemas
+
+# 局域网同步参考代码（安卓端，仅开发参考用）
+.reference/
+# 局域网同步的本地状态文件（便携模式下生成于 exe 同目录）
+lscopy-lan.json
+lan-files/

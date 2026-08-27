@@ -11,6 +11,7 @@
 - 支持文本、图片（含 CF_BITMAP/CF_DIB 截图软件兼容）、文件等类型，列表页按类型分标签页
 - 面板无边框：工具栏/底栏空白处可拖动，右缘/下缘/右下角可调大小
 - 📌 钉住桌面：失焦/粘贴不自动隐藏，可连续粘贴多条
+- 局域网多设备同步：与安卓端 ClipDitto 及其他电脑互相同步剪贴板（设置页「局域网同步」标签）
 - 可选「记住窗口大小」：重启后恢复上次调整的长宽
 - 系统托盘、开机自启、单实例、静默启动
 
@@ -28,19 +29,25 @@
 ```
 index.html          主窗口页面（剪贴板历史面板，无边框/置顶/默认隐藏）
 settings.html       设置窗口页面
+blocked.html        黑名单管理窗口页面（局域网同步拉黑设备的独立管理页）
 src/
   main.ts           主窗口前端逻辑（列表渲染、类型标签页、粘贴交互）
-  settings.ts       设置页逻辑（热键、自启、静默启动、数据库目录等）
+  settings.ts       设置页逻辑（热键、自启、数据库目录、局域网同步等）
+  blocked.ts        黑名单窗口逻辑（列表 + 移出黑名单）
   config.ts         前端共享配置
-  confirm.ts        确认对话框组件
+  confirm.ts        确认对话框组件（confirmDialog 二选一 / choiceDialog 多选一）
   styles.css        全局样式
 src-tauri/
-  src/lib.rs        后端主体（约 1800 行）：剪贴板监听、SQLite 存取、
+  src/lib.rs        后端主体（约 1900 行）：剪贴板监听、SQLite 存取、
                     托盘菜单、全局热键、窗口控制、模拟粘贴
+  src/lan.rs        局域网多设备同步（约 2200 行）：HTTP 服务（8765）、
+                    UDP beacon 发现（8766 / 组播 239.255.60.60:8767）、
+                    配对码鉴权（支持对方开「自动同意」时免码配对）、
+                    增量同步客户端、黑名单
   src/main.rs       入口（仅调用 lib）
-  capabilities/     Tauri 权限声明
+  capabilities/     Tauri 权限声明（windows 列表需包含新增窗口 label）
   tauri.conf.json   窗口/打包配置（identifier: com.administrator.lscopy）
-vite.config.ts      多页面构建配置（index + settings）
+vite.config.ts      多页面构建配置（index + settings + blocked）
 .github/workflows/  CI / 发布流程
 ```
 
@@ -77,6 +84,16 @@ cargo clippy           # lint
 
 ## 注意事项
 
+- **局域网同步**：协议与安卓端 ClipDitto 对齐（端口 8765、beacon 8766/8767、6 位配对码、
+  X-Token 头鉴权、自动反向配对）。同步状态独立持久化在 `lscopy-lan.json`（与 AppConfig 分开），
+  线上时间戳为**毫秒**（安卓端口径），库内 `created_at` 仍是秒，出入线时在 `lan.rs` 换算。
+  环回防护靠 `clips.remote_device_id` / `remote_id` 两列；文件类记录（本机路径）不对其他设备同步。
+  - 免码配对：`/info` 暴露 `autoAccept` 字段；对方开「自动同意配对」时 `/pair` 免配对码，
+    成功响应附带本机配对码（`{"result":"ok","token":…}`），请求方存下供后续 `/clips` 鉴权。
+  - 同步页前端每 2s 轮询重建设备列表：配对表单展开期间（`pairingDeviceId` 非空）必须跳过
+    列表重建，否则输入框会被刷掉；新增实时刷新类 UI 时注意同样的坑。
+- **批量删除三选一**：范围内有置顶记录时用 `choiceDialog` 提供「取消 / 只删非置顶 / 连同置顶删除」，
+  不要退回二选一弹窗（取消语义会被占用）。
 - **构建必须走 Tauri CLI**（`bun run tauri build` / `tauri dev`），不要裸 `cargo build --release`：CLI 会开启 `custom-protocol` 特性并正确处理前端资源协议，裸 cargo 构建的 exe 会显示"无法访问页面"。
 - Windows 为主要目标平台；`winreg` 仅 Windows 编译（`cfg(windows)`）。
 - 剪贴板图片读取有 Windows 原生兜底逻辑（CF_BITMAP/CF_DIB），改动相关代码时注意不要回归截图软件兼容性。

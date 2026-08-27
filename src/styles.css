@@ -693,3 +693,129 @@ body {
   color: var(--accent);
   font-size: 13px;
 }
+
+/* ---------- 局域网同步 ---------- */
+.lan-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.lan-device {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--bg-item);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.lan-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--text-dim);
+}
+
+.lan-dot.online {
+  background: #3fb950;
+  box-shadow: 0 0 6px rgba(63, 185, 80, 0.6);
+}
+
+.lan-device .lan-meta {
+  flex: 1;
+  min-width: 0;
+}
+
+.lan-device .lan-title {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lan-device .lan-sub {
+  color: var(--text-dim);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lan-device .lan-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.lan-badge {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+  margin-left: 6px;
+}
+
+.lan-badge.off {
+  background: color-mix(in srgb, var(--text-dim) 18%, transparent);
+  color: var(--text-dim);
+}
+
+/* 本机信息：紧凑网格布局 */
+.lan-info-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px 12px;
+  align-items: center;
+}
+
+.lan-label {
+  color: var(--text-dim);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.lan-value {
+  font-size: 13px;
+  color: var(--text);
+}
+
+.lan-token {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  color: var(--accent);
+}
+
+.lan-inline {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+
+.lan-inline input {
+  width: 110px;
+  padding: 4px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.lan-inline input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* hidden 属性会被 .settings-footer 的 display:flex 覆盖，需显式规则 */
+.settings-footer[hidden] {
+  display: none;
+}

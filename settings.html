@@ -17,6 +17,7 @@
         <button class="tab" data-tab="appearance">外观</button>
         <button class="tab" data-tab="rules">记录规则</button>
         <button class="tab" data-tab="database">数据库</button>
+        <button class="tab" data-tab="sync">局域网同步</button>
         <button class="tab" data-tab="delete">删除管理</button>
       </nav>
 
@@ -123,6 +124,58 @@
         </section>
       </div>
 
+      <!-- 局域网同步 -->
+      <div class="tab-panel" id="tab-sync" hidden>
+        <section class="card">
+          <h2>同步开关</h2>
+          <label class="check"><input id="lan-discoverable" type="checkbox" /> 可被其他设备发现（广播本机信息）</label>
+          <label class="check"><input id="lan-sharing" type="checkbox" /> 共享剪贴板（允许已配对设备拉取本机内容）</label>
+          <label class="check"><input id="lan-auto-sync" type="checkbox" /> 自动同步（每 30 秒拉取已配对设备的新内容）</label>
+          <label class="check"><input id="lan-auto-accept" type="checkbox" /> 自动同意配对请求（开启后其他设备无需输入配对码即可配对）</label>
+          <p class="desc">与安卓端「剪贴板管家」及其他电脑互通。所有开关即时生效，无需点击保存。</p>
+        </section>
+
+        <section class="card">
+          <h2>本机信息</h2>
+          <div class="lan-info-grid">
+            <span class="lan-label">本机 IP</span>
+            <code id="lan-ip" class="lan-value">获取中…</code>
+
+            <span class="lan-label">服务状态</span>
+            <span id="lan-server-status" class="lan-value">…</span>
+
+            <span class="lan-label">配对码</span>
+            <span class="lan-inline">
+              <code id="lan-token" class="lan-token">…</code>
+              <button id="lan-token-regen" class="btn small">重新生成</button>
+            </span>
+
+            <span class="lan-label">设备名称</span>
+            <span class="lan-inline">
+              <input id="lan-name" type="text" />
+              <button id="lan-name-save" class="btn small">改名</button>
+            </span>
+
+            <span class="lan-label">服务端口</span>
+            <span class="lan-inline">
+              <input id="lan-port" type="number" min="1024" max="65535" />
+              <button id="lan-port-save" class="btn small">应用</button>
+            </span>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>设备 <button id="lan-refresh" class="btn small">刷新</button>
+            <button id="lan-sweep" class="btn small">深度扫描</button>
+            <button id="lan-open-blocked" class="btn small">黑名单</button></h2>
+          <div class="row">
+            <input id="lan-manual-ip" type="text" placeholder="手动添加设备 IP，如 192.168.1.8" />
+            <button id="lan-add-ip" class="btn">添加</button>
+          </div>
+          <div id="lan-devices" class="lan-list"><p class="desc">未发现设备。请确认对方已开启「可被发现」，或手动添加 IP。</p></div>
+        </section>
+      </div>
+
       <!-- 删除管理 -->
       <div class="tab-panel" id="tab-delete" hidden>
         <section class="card">
@@ -134,7 +187,7 @@
             <button class="btn" data-range="30d">最近 30 天</button>
             <button class="btn danger" data-range="all">清空全部</button>
           </div>
-          <p class="desc">范围内有置顶记录时会先询问是否一并删除。</p>
+          <p class="desc">范围内有置顶记录时会先询问：连同置顶一起删除 / 只删除非置顶 / 取消。</p>
         </section>
 
         <section class="card">
