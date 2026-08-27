@@ -1,6 +1,6 @@
 //! 局域网多设备同步。
 //!
-//! 协议与安卓端「剪贴板管家（ClipDitto）」完全对齐，可与安卓 / Windows / macOS 互相同步：
+//! 协议与安卓端「共享剪贴板（ClipDitto）」完全对齐，可与安卓 / Windows / macOS 互相同步：
 //! - 本机 HTTP 服务（默认端口 8765）：GET /info、/pair、/unpair、/unblocked、/blocked、
 //!   /clips?since=、/file?id=
 //! - 设备发现：UDP 广播 beacon（8766）+ 组播 beacon（239.255.60.60:8767），每 3 秒一次
@@ -135,7 +135,6 @@ pub(crate) struct Discovered {
 
 /// LAN 模块的共享状态（挂在 AppState 上）
 pub struct LanShared {
-    pub file: PathBuf,
     pub settings: Mutex<LanSettings>,
     /// 在线发现的设备，key = deviceId
     pub discovered: Mutex<HashMap<String, Discovered>>,
@@ -151,9 +150,8 @@ pub struct LanShared {
 }
 
 impl LanShared {
-    pub fn new(file: PathBuf, settings: LanSettings) -> Self {
+    pub fn new(settings: LanSettings) -> Self {
         Self {
-            file,
             settings: Mutex::new(settings),
             discovered: Mutex::new(HashMap::new()),
             pending_pairs: Mutex::new(HashMap::new()),
@@ -209,6 +207,20 @@ fn default_device_name() -> String {
     }
     #[cfg(target_os = "macos")]
     {
+        // 优先「关于本机」里的电脑名（如“张三的 MacBook Pro”），失败再退化为 hostname
+        for (prog, args) in [
+            ("scutil", vec!["--get", "ComputerName"]),
+            ("hostname", vec![]),
+        ] {
+            if let Ok(out) = std::process::Command::new(prog).args(&args).output() {
+                if out.status.success() {
+                    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if !name.is_empty() {
+                        return name;
+                    }
+                }
+            }
+        }
         "Mac".into()
     }
     #[cfg(all(not(target_family = "windows"), not(target_os = "macos")))]
@@ -234,50 +246,30 @@ fn device_model() -> String {
 
 // ---------- 持久化 ----------
 
-pub fn settings_file() -> PathBuf {
-    exe_dir().join("lscopy-lan.json")
-}
-
-pub fn load_settings(path: &PathBuf) -> LanSettings {
-    let mut s: LanSettings = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|c| serde_json::from_str(&c).ok())
+/// 从 JSON 文本解析局域网设置（None/解析失败 → 默认值），并补全空字段。
+/// 只解析不落盘；统一由 persist_config 写入合并配置文件。
+pub fn parse_settings(raw: Option<&str>) -> LanSettings {
+    let mut s: LanSettings = raw
+        .and_then(|c| serde_json::from_str(c).ok())
         .unwrap_or_default();
-    // 首次启动：补全设备标识 / 名称 / 配对码
-    let mut dirty = false;
     if s.device_id.is_empty() {
         s.device_id = new_device_id();
-        dirty = true;
     }
     if s.device_name.is_empty() {
         s.device_name = default_device_name();
-        dirty = true;
     }
     if s.pairing_token.is_empty() {
         s.pairing_token = new_token();
-        dirty = true;
     }
     if s.server_port == 0 {
         s.server_port = DEFAULT_PORT;
-        dirty = true;
-    }
-    if dirty {
-        let _ = save_settings_file(path, &s);
     }
     s
 }
 
-fn save_settings_file(path: &PathBuf, s: &LanSettings) -> Result<(), String> {
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let json = serde_json::to_string_pretty(s).map_err(|e| e.to_string())?;
-    std::fs::write(path, json).map_err(|e| e.to_string())
-}
-
+/// 局域网设置变更后统一落盘：写入合并配置文件（锁顺序安全，调用点均已先释放 lan 锁）
 fn save_settings(state: &AppState) {
-    let s = state.lan.settings.lock().unwrap();
-    let _ = save_settings_file(&state.lan.file, &s);
+    let _ = crate::persist_config(state);
 }
 
 // ---------- 状态变化事件（节流 1s） ----------
@@ -1311,6 +1303,23 @@ fn beacon_payload(app: &AppHandle) -> Option<Vec<u8>> {
     Some(body.to_string().into_bytes())
 }
 
+/// beacon 目标地址：255 全网广播 + 各网卡子网广播 + 组播组（每轮动态计算，网卡可能变化）
+fn beacon_targets() -> Vec<(String, u16)> {
+    let mut targets: Vec<(String, u16)> = vec![
+        ("255.255.255.255".to_string(), BEACON_PORT),
+        (MULTICAST_GROUP.to_string(), MULTICAST_PORT),
+    ];
+    for (_, bcast) in local_ipv4_addrs() {
+        if let Some(b) = bcast {
+            let t = (b.to_string(), BEACON_PORT);
+            if !targets.contains(&t) {
+                targets.push(t);
+            }
+        }
+    }
+    targets
+}
+
 /// beacon 发送线程：「可被发现」开启时每 3 秒广播一次本机信息（广播 + 组播双发）
 fn beacon_sender_loop(app: AppHandle) {
     let socket = match UdpSocket::bind("0.0.0.0:0") {
@@ -1323,12 +1332,8 @@ fn beacon_sender_loop(app: AppHandle) {
     let _ = socket.set_broadcast(true);
     loop {
         if let Some(payload) = beacon_payload(&app) {
-            let targets = [
-                ("255.255.255.255", BEACON_PORT),
-                ("239.255.60.60", MULTICAST_PORT),
-            ];
-            for (addr, port) in targets {
-                let _ = socket.send_to(&payload, (addr, port));
+            for (addr, port) in beacon_targets() {
+                let _ = socket.send_to(&payload, (addr.as_str(), port));
             }
         }
         std::thread::sleep(BEACON_INTERVAL);
@@ -1345,9 +1350,19 @@ fn beacon_receiver_loop(app: AppHandle, multicast: bool) {
                 return;
             }
         };
-        if let Err(e) = s.join_multicast_v4(&MULTICAST_GROUP, &Ipv4Addr::UNSPECIFIED) {
-            eprintln!("[lan] 加入组播组失败: {e}");
-            return;
+        // macOS 有多块网卡（含 utun 虚拟网卡），按每个 IPv4 接口分别加入组播组；
+        // UNSPECIFIED 作为兜底，避免枚举失败时完全收不到
+        let mut joined = false;
+        for (ip, _) in local_ipv4_addrs() {
+            if s.join_multicast_v4(&MULTICAST_GROUP, &ip).is_ok() {
+                joined = true;
+            }
+        }
+        if !joined {
+            if let Err(e) = s.join_multicast_v4(&MULTICAST_GROUP, &Ipv4Addr::UNSPECIFIED) {
+                eprintln!("[lan] 加入组播组失败: {e}");
+                return;
+            }
         }
         s
     } else {
@@ -2085,18 +2100,41 @@ pub async fn lan_sweep(app: AppHandle) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
-/// 本机局域网 IPv4 地址
+/// 本机局域网 IPv4 地址（if-addrs 枚举网卡，优先私有地址；失败时退回 UDP 出口探测）
 fn local_ip() -> Option<String> {
-    // 通过 UDP "连接"外网地址的方式拿到本机出口网卡 IP（不会真的发包）
+    let addrs = local_ipv4_addrs();
+    if let Some((ip, _)) = addrs.iter().find(|(ip, _)| ip.is_private()) {
+        return Some(ip.to_string());
+    }
+    if let Some((ip, _)) = addrs.first() {
+        return Some(ip.to_string());
+    }
+    // 兜底：UDP "连接"外网地址拿本机出口网卡 IP（不会真的发包）
     let s = UdpSocket::bind("0.0.0.0:0").ok()?;
     s.connect("8.8.8.8:80").ok()?;
-    let addr = s.local_addr().ok()?;
-    let ip = addr.ip().to_string();
+    let ip = s.local_addr().ok()?.ip().to_string();
     if ip.starts_with("0.") || ip.starts_with("127.") {
         None
     } else {
         Some(ip)
     }
+}
+
+/// 枚举本机所有非回环、非链路本地的 IPv4 网卡地址及其广播地址。
+/// macOS 上 UDP 出口探测常拿到 utun（VPN 虚拟网卡）地址，必须按网卡枚举才准确。
+fn local_ipv4_addrs() -> Vec<(Ipv4Addr, Option<Ipv4Addr>)> {
+    if_addrs::get_if_addrs()
+        .map(|ifs| {
+            ifs.into_iter()
+                .filter_map(|i| match i.addr {
+                    if_addrs::IfAddr::V4(v4) if !v4.is_loopback() && !v4.is_link_local() => {
+                        Some((v4.ip, v4.broadcast))
+                    }
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// 用配对码配对一台设备

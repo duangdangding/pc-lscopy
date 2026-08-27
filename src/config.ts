@@ -5,6 +5,7 @@ export interface AppConfig {
   autostart: boolean;
   silent_start: boolean;
   db_dir: string | null;
+  config_dir: string | null; // 配置文件目录；null = 程序所在目录
   theme: string; // "dark" | "light"
   font_family: string;
   font_size: number;

@@ -4,7 +4,7 @@
 
 ## 项目简介
 
-**lscopy（剪贴板管家）**——一个 Windows 桌面剪贴板管理工具，基于 **Tauri 2 + Vanilla TypeScript + Rust**。
+**lscopy（共享剪贴板）**——一个 Windows 桌面剪贴板管理工具，基于 **Tauri 2 + Vanilla TypeScript + Rust**。
 
 - 全局热键唤起剪贴板历史面板，点击/回车即粘贴
 - 历史记录持久化在 SQLite（rusqlite，bundled）
@@ -85,9 +85,13 @@ cargo clippy           # lint
 ## 注意事项
 
 - **局域网同步**：协议与安卓端 ClipDitto 对齐（端口 8765、beacon 8766/8767、6 位配对码、
-  X-Token 头鉴权、自动反向配对）。同步状态独立持久化在 `lscopy-lan.json`（与 AppConfig 分开），
-  线上时间戳为**毫秒**（安卓端口径），库内 `created_at` 仍是秒，出入线时在 `lan.rs` 换算。
+  X-Token 头鉴权、自动反向配对）。同步设置（LanSettings）已合并进统一配置文件
+  `lscopy-config.json`（顶层 `lan` 键），不再单独持久化；旧版独立 `lscopy-lan.json`
+  会在首次启动时读取并改名为 `.bak`。线上时间戳为**毫秒**（安卓端口径），库内
+  `created_at` 仍是秒，出入线时在 `lan.rs` 换算。
   环回防护靠 `clips.remote_device_id` / `remote_id` 两列；文件类记录（本机路径）不对其他设备同步。
+  - mac 适配：默认设备名取 `scutil --get ComputerName`；本机 IP 与子网广播地址通过
+    `if-addrs` 枚举网卡获得（mac 上 UDP connect 8.8.8.8 技巧不可靠）；组播按接口逐个加入。
   - 免码配对：`/info` 暴露 `autoAccept` 字段；对方开「自动同意配对」时 `/pair` 免配对码，
     成功响应附带本机配对码（`{"result":"ok","token":…}`），请求方存下供后续 `/clips` 鉴权。
   - 同步页前端每 2s 轮询重建设备列表：配对表单展开期间（`pairingDeviceId` 非空）必须跳过
@@ -97,7 +101,10 @@ cargo clippy           # lint
 - **构建必须走 Tauri CLI**（`bun run tauri build` / `tauri dev`），不要裸 `cargo build --release`：CLI 会开启 `custom-protocol` 特性并正确处理前端资源协议，裸 cargo 构建的 exe 会显示"无法访问页面"。
 - Windows 为主要目标平台；`winreg` 仅 Windows 编译（`cfg(windows)`）。
 - 剪贴板图片读取有 Windows 原生兜底逻辑（CF_BITMAP/CF_DIB），改动相关代码时注意不要回归截图软件兼容性。
-- 配置文件 `lscopy-config.json` 与数据库 `lscopy.db` 默认都在 **exe 同目录**（便携模式）；旧版系统配置目录（`%APPDATA%`）的配置会在首次启动时自动迁移。
+- 配置统一保存在 `lscopy-config.json`（顶层 `app` + `lan` 两键），默认在 **exe 同目录**（便携模式）；
+  实际目录由 exe 同目录的指针文件 `lscopy-config-dir.txt` 决定（设置页「配置文件」可自定义，
+  改动时询问是否迁移旧文件）。数据库 `lscopy.db` 默认也在 exe 同目录；旧版系统配置目录
+  （`%APPDATA%`）的配置会在首次启动时自动迁移。落盘统一走 `persist_config`（锁顺序固定 config → lan.settings → config_file）。
 - 主窗口失焦自动隐藏是**延迟 150ms 复查**实现的（拖动/缩放会造成瞬时失焦）；改动窗口事件逻辑时注意 `dragging` / `panel_pinned` / `main_focused` 三个状态。
 - 版本号需同步修改 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 三处（`Cargo.lock` 随构建自动更新）。
 - 发布流程：推 `v*` tag 触发 `.github/workflows/release.yml`，Windows + macOS 构建并生成 draft release。

@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <link rel="stylesheet" href="/src/styles.css" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>设置 - 剪贴板管家</title>
+    <title>设置 - 共享剪贴板</title>
     <script type="module" src="/src/settings.ts" defer></script>
   </head>
 
@@ -48,6 +48,16 @@
           <h2>面板</h2>
           <label class="check"><input id="remember-size" type="checkbox" /> 记住窗口大小（重启后恢复上次的长宽）</label>
           <p class="desc">拖动面板右缘 / 下缘 / 右下角可调整大小；开启后调整结果会被记住，下次启动保持不变。</p>
+        </section>
+
+        <section class="card">
+          <h2>配置文件</h2>
+          <div class="row">
+            <input id="config-dir" type="text" placeholder="默认：程序所在目录" />
+            <button id="config-dir-browse" class="btn">选择目录…</button>
+            <button id="config-dir-default" class="btn">恢复默认</button>
+          </div>
+          <p class="desc">所有设置（含局域网同步）统一保存在所选目录下的 lscopy-config.json。修改目录时会询问是否把原配置迁移过去。</p>
         </section>
       </div>
 
@@ -132,7 +142,7 @@
           <label class="check"><input id="lan-sharing" type="checkbox" /> 共享剪贴板（允许已配对设备拉取本机内容）</label>
           <label class="check"><input id="lan-auto-sync" type="checkbox" /> 自动同步（每 30 秒拉取已配对设备的新内容）</label>
           <label class="check"><input id="lan-auto-accept" type="checkbox" /> 自动同意配对请求（开启后其他设备无需输入配对码即可配对）</label>
-          <p class="desc">与安卓端「剪贴板管家」及其他电脑互通。所有开关即时生效，无需点击保存。</p>
+          <p class="desc">与安卓端「共享剪贴板」及其他电脑互通。所有开关即时生效，无需点击保存。</p>
         </section>
 
         <section class="card">

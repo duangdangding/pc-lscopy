@@ -82,6 +82,16 @@ $("#db-default").addEventListener("click", () => {
   dbDirEl.value = "";
 });
 
+// ---------- 配置文件目录 ----------
+const configDirEl = $<HTMLInputElement>("#config-dir");
+$("#config-dir-browse").addEventListener("click", async () => {
+  const dir = await open({ directory: true, title: "选择配置文件所在目录" });
+  if (typeof dir === "string") configDirEl.value = dir;
+});
+$("#config-dir-default").addEventListener("click", () => {
+  configDirEl.value = "";
+});
+
 // ---------- 导入 / 导出 ----------
 $("#btn-export").addEventListener("click", async () => {
   const path = await save({
@@ -541,12 +551,28 @@ $("#db-info-refresh").addEventListener("click", refreshDbInfo);
 
 // ---------- 保存 ----------
 $("#btn-save").addEventListener("click", async () => {
+  const nextConfigDir = configDirEl.value.trim() || null;
+  // 配置目录有变化时，询问是否把原配置文件迁移过去
+  let migrateConfig = false;
+  if (nextConfigDir !== (config.config_dir ?? null)) {
+    const choice = await choiceDialog(
+      "配置文件目录已修改，原位置的配置文件如何处理？",
+      [
+        { value: "cancel", text: "取消" },
+        { value: "keep", text: "保留旧配置副本" },
+        { value: "move", text: "迁移并删除旧文件", kind: "danger" },
+      ]
+    );
+    if (choice === null || choice === "cancel") return; // 取消：放弃本次保存
+    migrateConfig = choice === "move";
+  }
   const next: AppConfig = {
     hotkey: hotkeyEl.value.trim() || "Ctrl+`",
     enabled: enabledEl.checked,
     autostart: autostartEl.checked,
     silent_start: silentStartEl.checked,
     db_dir: dbDirEl.value.trim() || null,
+    config_dir: nextConfigDir,
     theme: themeEl.value,
     font_family: fontFamilyEl.value.trim(),
     font_size: Math.max(10, Math.min(24, Number(fontSizeEl.value) || 14)),
@@ -563,7 +589,7 @@ $("#btn-save").addEventListener("click", async () => {
     window_height: config.window_height,
   };
   try {
-    await invoke("save_config", { config: next });
+    await invoke("save_config", { config: next, migrateConfig });
     config = next;
     saveMsgEl.textContent = "✓ 已保存";
     window.setTimeout(() => (saveMsgEl.textContent = ""), 2000);
@@ -653,6 +679,7 @@ listen<AppConfig>("config-changed", (e) => {
   silentStartEl.checked = config.silent_start;
   rememberSizeEl.checked = config.remember_size ?? false;
   dbDirEl.value = config.db_dir || "";
+  configDirEl.value = config.config_dir || "";
   themeEl.value = config.theme;
   fontFamilyEl.value = config.font_family;
   fontSizeEl.value = String(config.font_size);

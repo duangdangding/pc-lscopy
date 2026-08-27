@@ -30,6 +30,7 @@ pub struct AppConfig {
     pub autostart: bool,         // 开机自启
     pub silent_start: bool,      // 静默启动（不弹主窗口）
     pub db_dir: Option<String>,  // 数据库目录；None = 启动文件所在目录
+    pub config_dir: Option<String>, // 配置文件目录；None = 启动文件所在目录
     pub theme: String,           // "dark" | "light"
     pub font_family: String,
     pub font_size: u32,
@@ -50,6 +51,7 @@ impl Default for AppConfig {
             autostart: false,
             silent_start: true,
             db_dir: None,
+            config_dir: None,
             theme: "dark".into(),
             font_family: "Segoe UI, Microsoft YaHei, system-ui, sans-serif".into(),
             font_size: 14,
@@ -65,19 +67,81 @@ impl Default for AppConfig {
     }
 }
 
-fn load_config(path: &PathBuf) -> AppConfig {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+/// 合并后的配置文件结构：通用设置 + 局域网同步设置保存在同一个 JSON
+#[derive(Serialize, Deserialize, Default)]
+#[serde(default)]
+struct ConfigFile {
+    app: AppConfig,
+    lan: lan::LanSettings,
 }
 
-fn save_config_file(path: &PathBuf, cfg: &AppConfig) -> Result<(), String> {
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+/// 配置文件目录指针文件：始终放在 exe 同目录，内容是配置文件所在目录（空 = exe 同目录）
+fn config_pointer_file() -> PathBuf {
+    exe_dir().join("lscopy-config-dir.txt")
+}
+
+/// 当前生效的配置文件路径（读指针文件决定目录）
+fn current_config_file() -> PathBuf {
+    let dir = std::fs::read_to_string(config_pointer_file())
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(exe_dir);
+    dir.join("lscopy-config.json")
+}
+
+/// 按配置里的 config_dir 计算配置文件路径
+fn effective_config_file(cfg: &AppConfig) -> PathBuf {
+    cfg.config_dir
+        .as_ref()
+        .map(|d| d.trim())
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(exe_dir)
+        .join("lscopy-config.json")
+}
+
+/// 解析配置文件文本为（通用设置, 局域网设置）。
+/// 兼容旧格式：扁平的 AppConfig JSON（局域网设置再从旧 lscopy-lan.json 读）。
+fn load_config_full(raw: Option<&str>) -> (AppConfig, lan::LanSettings) {
+    if let Some(text) = raw {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
+            if v.get("app").is_some() || v.get("lan").is_some() {
+                // 新格式：{ "app": {...}, "lan": {...} }（各字段缺失时按默认值填充）
+                if let Ok(mut cf) = serde_json::from_value::<ConfigFile>(v) {
+                    cf.lan = lan::parse_settings(
+                        serde_json::to_string(&cf.lan).ok().as_deref(),
+                    );
+                    return (cf.app, cf.lan);
+                }
+            } else {
+                // 旧格式：整个文件就是 AppConfig
+                let app: AppConfig = serde_json::from_value(v).unwrap_or_default();
+                let old_lan = exe_dir().join("lscopy-lan.json");
+                let lan_raw = std::fs::read_to_string(&old_lan).ok();
+                return (app, lan::parse_settings(lan_raw.as_deref()));
+            }
+        }
     }
-    let json = serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?;
-    std::fs::write(path, json).map_err(|e| e.to_string())
+    (
+        AppConfig::default(),
+        lan::parse_settings(None),
+    )
+}
+
+/// 把「通用设置 + 局域网设置」合并写入配置文件。
+/// 锁顺序固定：config → lan.settings → config_file，各调用点不得反向加锁。
+pub(crate) fn persist_config(state: &AppState) -> Result<(), String> {
+    let app = state.config.lock().unwrap().clone();
+    let lan = state.lan.settings.lock().unwrap().clone();
+    let path = state.config_file.lock().unwrap().clone();
+    let cf = ConfigFile { app, lan };
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let json = serde_json::to_string_pretty(&cf).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| e.to_string())
 }
 
 // ---------- 数据模型 ----------
@@ -175,7 +239,7 @@ struct DbInfo {
 struct AppState {
     pub(crate) db: Mutex<Connection>,
     pub(crate) config: Mutex<AppConfig>,
-    config_file: PathBuf,
+    config_file: Mutex<PathBuf>,
     // 已删除/被排除内容的哈希集合：命中即跳过，直到有新内容入库后清空
     ignored_hashes: Mutex<Vec<u64>>,
     // 监听线程已处理过的剪贴板内容哈希，避免轮询重复处理同一内容
@@ -854,7 +918,8 @@ fn start_watcher(app: AppHandle) {
                     if cfg.remember_size {
                         cfg.window_width = w;
                         cfg.window_height = h;
-                        let _ = save_config_file(&state.config_file, &cfg);
+                        drop(cfg);
+                        let _ = persist_config(&state);
                     }
                 }
             }
@@ -1360,7 +1425,12 @@ fn get_config(state: State<AppState>) -> AppConfig {
 }
 
 #[tauri::command]
-fn save_config(app: AppHandle, state: State<AppState>, config: AppConfig) -> Result<(), String> {
+fn save_config(
+    app: AppHandle,
+    state: State<AppState>,
+    config: AppConfig,
+    migrate_config: bool,
+) -> Result<(), String> {
     // 0. 开启「记住窗口大小」时，立即把当前面板实际尺寸写入配置
     let mut config = config;
     if config.remember_size {
@@ -1373,30 +1443,52 @@ fn save_config(app: AppHandle, state: State<AppState>, config: AppConfig) -> Res
     }
 
     // 1. 数据库目录变更：打开新库并切换（旧库文件保留不删）
-    let old_dir = state.config.lock().unwrap().db_dir.clone();
-    if old_dir != config.db_dir {
+    let old = state.config.lock().unwrap().clone();
+    if old.db_dir != config.db_dir {
         let new_path = effective_db_path(&config);
         let conn = init_db(&new_path)?;
         let mut db = state.db.lock().unwrap();
         *db = conn;
     }
 
-    // 2. 重注册全局热键
+    // 2. 配置文件目录变更：验证新目录可写 → 更新指针 → 切换，按需删除旧文件
+    if old.config_dir != config.config_dir {
+        let new_file = effective_config_file(&config);
+        if let Some(dir) = new_file.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("创建配置目录失败：{}", e))?;
+        }
+        // 试写探测（只写不存在的临时文件，避免误覆盖）
+        let probe = new_file.with_extension("tmp");
+        std::fs::write(&probe, "{}").map_err(|e| format!("配置目录不可写：{}", e))?;
+        let _ = std::fs::remove_file(&probe);
+
+        let old_file = state.config_file.lock().unwrap().clone();
+        // 指针文件：空字符串表示默认（exe 同目录）
+        let pointer = config.config_dir.clone().unwrap_or_default();
+        std::fs::write(config_pointer_file(), pointer)
+            .map_err(|e| format!("保存配置目录设置失败：{}", e))?;
+        *state.config_file.lock().unwrap() = new_file.clone();
+        if migrate_config && old_file != new_file {
+            let _ = std::fs::remove_file(&old_file);
+        }
+    }
+
+    // 3. 重注册全局热键
     register_hotkey(&app, &config.hotkey)?;
 
-    // 3. 应用开机自启
+    // 4. 应用开机自启
     apply_autostart(&app, config.autostart);
 
-    // 4. 持久化 + 同步托盘开关 + 广播
-    save_config_file(&state.config_file, &config)?;
+    // 5. 持久化 + 同步托盘开关 + 广播
     if config.enabled {
         // 从关闭切到开启时，忽略当前剪贴板内容（关闭期间的不补录）
         ignore_current_clipboard(&state);
     }
+    *state.config.lock().unwrap() = config.clone();
+    persist_config(&state)?;
     if let Some(item) = state.tray_toggle.lock().unwrap().as_ref() {
         let _ = item.set_checked(config.enabled);
     }
-    *state.config.lock().unwrap() = config.clone();
     let _ = app.emit("config-changed", config);
     Ok(())
 }
@@ -1544,9 +1636,9 @@ fn set_recording_enabled(app: &AppHandle, enabled: bool) {
     let cfg = {
         let mut cfg = state.config.lock().unwrap();
         cfg.enabled = enabled;
-        let _ = save_config_file(&state.config_file, &cfg);
         cfg.clone()
     };
+    let _ = persist_config(&state);
     if enabled {
         // 关闭期间复制的内容不入库：开启瞬间忽略当前剪贴板内容
         ignore_current_clipboard(&state);
@@ -1742,7 +1834,7 @@ pub fn run() {
         // 单实例：重复启动时提示并聚焦已有窗口
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             app.dialog()
-                .message("剪贴板管家已经在运行中，可通过托盘图标或快捷键呼出。")
+                .message("共享剪贴板已经在运行中，可通过托盘图标或快捷键呼出。")
                 .title("提示")
                 .blocking_show();
             if let Some(w) = app.get_webview_window("main") {
@@ -1766,9 +1858,10 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
-            // 配置文件放在软件同目录（便携模式，和数据库默认位置一致）
+            // 配置文件放在软件同目录（便携模式，和数据库默认位置一致），
+            // 实际目录由指针文件 lscopy-config-dir.txt 决定（可在设置里自定义）。
             // 旧版本配置在系统配置目录：首次启动自动迁移过来
-            let config_file = exe_dir().join("lscopy-config.json");
+            let config_file = current_config_file();
             if !config_file.exists() {
                 let legacy = app
                     .path()
@@ -1779,15 +1872,13 @@ pub fn run() {
                     let _ = std::fs::copy(&legacy, &config_file);
                 }
             }
-            let config = load_config(&config_file);
+            let raw = std::fs::read_to_string(&config_file).ok();
+            let (config, lan_settings) = load_config_full(raw.as_deref());
             let db = init_db(&effective_db_path(&config))?;
-            // 局域网同步：加载持久化状态（首次启动自动生成设备标识/名称/配对码）
-            let lan_file = lan::settings_file();
-            let lan_settings = lan::load_settings(&lan_file);
             app.manage(AppState {
                 db: Mutex::new(db),
                 config: Mutex::new(config.clone()),
-                config_file,
+                config_file: Mutex::new(config_file),
                 ignored_hashes: Mutex::new(Vec::new()),
                 last_seen: Mutex::new(0),
                 tray_toggle: Mutex::new(None),
@@ -1798,8 +1889,18 @@ pub fn run() {
                 dragging: AtomicBool::new(false),
                 main_focused: AtomicBool::new(false),
                 pending_size: Mutex::new(None),
-                lan: lan::LanShared::new(lan_file, lan_settings),
+                lan: lan::LanShared::new(lan_settings),
             });
+            // 统一为合并格式落盘一次（旧格式/旧局域网文件 → 新 ConfigFile）
+            {
+                let state = app.state::<AppState>();
+                let _ = persist_config(&state);
+            }
+            // 旧版独立局域网配置文件：迁移后备份为 .bak
+            let old_lan = exe_dir().join("lscopy-lan.json");
+            if old_lan.exists() {
+                let _ = std::fs::rename(&old_lan, old_lan.with_extension("json.bak"));
+            }
 
             // 托盘
             let show = MenuItem::with_id(app, "show", "显示面板", true, None::<&str>)?;
@@ -1810,7 +1911,7 @@ pub fn run() {
             TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
-                .tooltip(&format!("剪贴板管家 ({})", config.hotkey))
+                .tooltip(&format!("共享剪贴板 ({})", config.hotkey))
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => toggle_window(app),
                     "toggle" => {
