@@ -14,7 +14,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "共享剪贴板",
+        "title": "共享剪贴板-卢",
         "width": 420,
         "height": 640,
         "url": "index.html",
@@ -27,7 +27,7 @@
       },
       {
         "label": "settings",
-        "title": "设置 - 共享剪贴板",
+        "title": "设置 - 共享剪贴板-卢",
         "width": 620,
         "height": 780,
         "url": "settings.html",
@@ -35,7 +35,7 @@
       },
       {
         "label": "blocked",
-        "title": "黑名单管理 - 共享剪贴板",
+        "title": "黑名单管理 - 共享剪贴板-卢",
         "width": 480,
         "height": 560,
         "url": "blocked.html",

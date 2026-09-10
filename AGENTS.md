@@ -4,7 +4,7 @@
 
 ## 项目简介
 
-**lscopy（共享剪贴板）**——一个 Windows 桌面剪贴板管理工具，基于 **Tauri 2 + Vanilla TypeScript + Rust**。
+**lscopy（共享剪贴板-卢）**——一个 Windows 桌面共享剪贴板管理工具，基于 **Tauri 2 + Vanilla TypeScript + Rust**。
 
 - 全局热键唤起剪贴板历史面板，点击/回车即粘贴
 - 历史记录持久化在 SQLite（rusqlite，bundled）
