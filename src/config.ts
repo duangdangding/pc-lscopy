@@ -23,6 +23,44 @@ export async function loadConfig(): Promise<AppConfig> {
   return await invoke<AppConfig>("get_config");
 }
 
+/** 是否 macOS（用于快捷键的显示与默认值） */
+export const isMac = /mac/i.test(navigator.platform || navigator.userAgent);
+
+/** 平台默认全局快捷键：mac 用 Cmd+Shift+V，Windows/Linux 用 Ctrl+` */
+export const DEFAULT_HOTKEY = isMac ? "Cmd+Shift+V" : "Ctrl+`";
+
+/**
+ * 把存储格式的快捷键（如 "Ctrl+Shift+V" / "Cmd+`"）转成当前平台的显示形式。
+ * mac 上显示为符号形式：⌃ Control、⇧ Shift、⌥ Option、⌘ Command，键名间不加 "+"；
+ * Windows/Linux 原样返回。
+ */
+export function formatHotkey(hk: string): string {
+  if (!isMac) return hk;
+  return hk
+    .split("+")
+    .map((p) => {
+      switch (p.trim().toLowerCase()) {
+        case "ctrl":
+        case "control":
+          return "⌃";
+        case "shift":
+          return "⇧";
+        case "alt":
+        case "option":
+          return "⌥";
+        case "win":
+        case "cmd":
+        case "command":
+        case "super":
+        case "meta":
+          return "⌘";
+        default:
+          return p.trim();
+      }
+    })
+    .join("");
+}
+
 export function applyAppearance(cfg: AppConfig) {
   const root = document.documentElement;
   root.dataset.theme = cfg.theme === "light" ? "light" : "dark";

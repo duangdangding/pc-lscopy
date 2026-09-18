@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { applyAppearance, AppConfig, loadConfig } from "./config";
+import { applyAppearance, AppConfig, DEFAULT_HOTKEY, formatHotkey, isMac, loadConfig } from "./config";
 import { confirmDialog, choiceDialog } from "./confirm";
 
 const $ = <T extends HTMLElement>(sel: string) =>
@@ -60,9 +60,11 @@ hotkeyEl.addEventListener("keydown", (e) => {
   if (e.ctrlKey) parts.push("Ctrl");
   if (e.shiftKey) parts.push("Shift");
   if (e.altKey) parts.push("Alt");
-  if (e.metaKey) parts.push("Win");
+  if (e.metaKey) parts.push(isMac ? "Cmd" : "Win"); // mac 上 Meta 是 Command
   if (!parts.length) {
-    hotkeyEl.value = "请同时按住 Ctrl / Shift / Alt / Win 中至少一个";
+    hotkeyEl.value = isMac
+      ? "请同时按住 ⌘ / ⌃ / ⌥ / ⇧ 中至少一个"
+      : "请同时按住 Ctrl / Shift / Alt / Win 中至少一个";
     return;
   }
   parts.push(key);
@@ -70,8 +72,20 @@ hotkeyEl.addEventListener("keydown", (e) => {
 });
 
 $("#hotkey-reset").addEventListener("click", () => {
-  hotkeyEl.value = "Ctrl+`";
+  hotkeyEl.value = DEFAULT_HOTKEY;
 });
+
+// 按平台刷新快捷键相关文案（恢复默认按钮 + 说明文字）
+{
+  const resetBtn = $<HTMLButtonElement>("#hotkey-reset");
+  resetBtn.textContent = `恢复默认 ${formatHotkey(DEFAULT_HOTKEY)}`;
+  const descEl = $<HTMLParagraphElement>("#hotkey-desc");
+  if (descEl) {
+    descEl.textContent = isMac
+      ? "用于呼出/隐藏剪贴板面板，需包含 ⌘ / ⌃ / ⌥ / ⇧ 中至少一个修饰键。"
+      : "用于呼出/隐藏剪贴板面板，需包含 Ctrl / Shift / Alt / Win 中至少一个修饰键。";
+  }
+}
 
 // ---------- 数据库目录 ----------
 $("#db-browse").addEventListener("click", async () => {
@@ -788,7 +802,7 @@ $("#btn-save").addEventListener("click", async () => {
     migrateConfig = choice === "move";
   }
   const next: AppConfig = {
-    hotkey: hotkeyEl.value.trim() || "Ctrl+`",
+    hotkey: hotkeyEl.value.trim() || DEFAULT_HOTKEY,
     enabled: enabledEl.checked,
     autostart: autostartEl.checked,
     silent_start: silentStartEl.checked,

@@ -44,10 +44,36 @@ pub struct AppConfig {
     pub window_height: u32,      // 记住的窗口高度（物理像素）
 }
 
+/// 平台默认全局快捷键：mac 用 Cmd+Shift+V，Windows/Linux 用 Ctrl+`
+fn default_hotkey() -> String {
+    if cfg!(target_os = "macos") {
+        "Cmd+Shift+V".into()
+    } else {
+        "Ctrl+`".into()
+    }
+}
+
+/// 快捷键显示形式：mac 上把修饰键转成符号（⌃⇧⌥⌘），其他平台原样返回
+fn format_hotkey_display(hk: &str) -> String {
+    if !cfg!(target_os = "macos") {
+        return hk.to_string();
+    }
+    hk.split('+')
+        .map(|p| match p.trim().to_lowercase().as_str() {
+            "ctrl" | "control" => "⌃".to_string(),
+            "shift" => "⇧".to_string(),
+            "alt" | "option" => "⌥".to_string(),
+            "win" | "cmd" | "command" | "super" | "meta" => "⌘".to_string(),
+            _ => p.trim().to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            hotkey: "Ctrl+`".into(),
+            hotkey: default_hotkey(),
             autostart: false,
             silent_start: true,
             db_dir: None,
@@ -1911,7 +1937,7 @@ pub fn run() {
             TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
-                .tooltip(&format!("共享剪贴板 ({})", config.hotkey))
+                .tooltip(&format!("共享剪贴板 ({})", format_hotkey_display(&config.hotkey)))
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => toggle_window(app),
                     "toggle" => {

@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { applyAppearance, AppConfig, loadConfig } from "./config";
+import { applyAppearance, AppConfig, DEFAULT_HOTKEY, formatHotkey, isMac, loadConfig } from "./config";
 import { confirmDialog } from "./confirm";
 
 interface Clip {
@@ -96,11 +96,14 @@ function fmtTime(ts: number): string {
 }
 
 function updateHint() {
-  const hk = config?.hotkey || "Ctrl+`";
+  const hk = formatHotkey(config?.hotkey || DEFAULT_HOTKEY);
   hintEl.textContent = panelPinned
     ? `📌 已钉住 · Enter 粘贴不隐藏 · Esc 关闭 · ${hk} 呼出/隐藏`
     : `↑↓ 选择 · Enter 粘贴 · Esc 关闭 · 右键仅复制 · ${hk} 呼出/隐藏`;
 }
+
+// 空列表提示中的复制快捷键按平台显示（mac 为 ⌘C）
+emptyEl.textContent = `暂无记录，复制点什么试试 (${isMac ? "⌘C" : "Ctrl+C"})`;
 
 // ---------- 面板钉住：钉住后失焦/粘贴都不自动隐藏 ----------
 const pinBtn = document.querySelector<HTMLButtonElement>("#btn-pin")!;
