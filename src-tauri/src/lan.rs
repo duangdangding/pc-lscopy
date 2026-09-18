@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
 
-use crate::{encode_png, exe_dir, hash_bytes, now_secs, AppState};
+use crate::{encode_png, hash_bytes, now_secs, AppState};
 
 // ---------- 常量 ----------
 
@@ -34,7 +34,9 @@ const BEACON_PORT: u16 = 8766;
 const MULTICAST_GROUP: Ipv4Addr = Ipv4Addr::new(239, 255, 60, 60);
 const MULTICAST_PORT: u16 = 8767;
 const BEACON_INTERVAL: Duration = Duration::from_secs(3);
-const AUTO_SYNC_INTERVAL: Duration = Duration::from_secs(30);
+/// 自动同步间隔范围（秒）：设置值会被夹到该区间
+const MIN_AUTO_SYNC_SECS: u64 = 5;
+const MAX_AUTO_SYNC_SECS: u64 = 3600;
 /// 设备在线判定窗口：beacon 周期 3s，放宽到 12s
 const ONLINE_WINDOW: Duration = Duration::from_secs(12);
 /// 拉取远端文件的大小上限（防止超大文件打爆内存）
@@ -46,6 +48,8 @@ const CLIPS_PAGE_LIMIT: i64 = 500;
 const WIRE_TEXT: i64 = 0;
 const WIRE_IMAGE: i64 = 1;
 // 2/3/4（文件/视频/音频）统一按文件处理（import_clip 的 fallthrough 分支）
+const WIRE_VIDEO: i64 = 3;
+const WIRE_AUDIO: i64 = 4;
 
 // ---------- 数据模型 ----------
 
@@ -85,8 +89,12 @@ pub struct LanSettings {
     pub discoverable: bool,
     /// 允许其他已配对设备拉取本机剪贴板
     pub sharing: bool,
-    /// 自动把已配对设备的内容同步到本机（30s 轮询）
+    /// 共享时加密传输（/clips /file 响应体加密，密钥为对方持有的配对码）
+    pub encrypt_transfer: bool,
+    /// 自动把已配对设备的内容同步到本机（轮询）
     pub auto_sync: bool,
+    /// 自动同步间隔（秒），默认 30
+    pub auto_sync_interval_secs: u64,
     /// 自动同意配对请求：关闭时（默认）每次配对需在设置页手动确认
     pub auto_accept_pair: bool,
     /// 本机设备唯一标识，首次启动生成后固定不变
@@ -105,6 +113,16 @@ pub struct LanSettings {
     pub blocked_by: HashSet<String>,
     /// 每台设备上次同步到的毫秒时间戳（增量拉取游标）
     pub last_sync: HashMap<String, i64>,
+    /// 同步文件保存目录：None = 从未配置（启动时填系统下载目录）；
+    /// Some(空串) = 用户主动清空 → 仅同步文字
+    pub download_dir: Option<String>,
+    /// 同步文件大小上限（MB），超过不同步（对需要下载的图片/文件生效）
+    pub max_file_mb: u64,
+    /// 同步类型开关：文字 / 图片 / 影视（视频+音频）/ 其他文件
+    pub sync_text: bool,
+    pub sync_image: bool,
+    pub sync_media: bool,
+    pub sync_other: bool,
 }
 
 impl Default for LanSettings {
@@ -112,7 +130,9 @@ impl Default for LanSettings {
         Self {
             discoverable: false,
             sharing: false,
+            encrypt_transfer: false,
             auto_sync: false,
+            auto_sync_interval_secs: 30,
             auto_accept_pair: false,
             device_id: String::new(),
             device_name: String::new(),
@@ -122,6 +142,12 @@ impl Default for LanSettings {
             blocked: HashMap::new(),
             blocked_by: HashSet::new(),
             last_sync: HashMap::new(),
+            download_dir: None,
+            max_file_mb: 20,
+            sync_text: true,
+            sync_image: true,
+            sync_media: true,
+            sync_other: true,
         }
     }
 }
@@ -354,21 +380,97 @@ fn http_reason(code: u16) -> &'static str {
     }
 }
 
-fn respond(stream: &mut TcpStream, code: u16, content_type: &str, body: &[u8]) {
+fn respond_extra(
+    stream: &mut TcpStream,
+    code: u16,
+    content_type: &str,
+    body: &[u8],
+    extra_headers: &str,
+) {
     let head = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {} {}\r\nContent-Type: {}; charset=utf-8\r\nContent-Length: {}\r\n{}Connection: close\r\n\r\n",
         code,
         http_reason(code),
         content_type,
-        body.len()
+        body.len(),
+        extra_headers,
     );
     let _ = stream.write_all(head.as_bytes());
     let _ = stream.write_all(body);
     let _ = stream.flush();
 }
 
+fn respond(stream: &mut TcpStream, code: u16, content_type: &str, body: &[u8]) {
+    respond_extra(stream, code, content_type, body, "");
+}
+
 fn respond_json(stream: &mut TcpStream, code: u16, body: &str) {
     respond(stream, code, "application/json", body.as_bytes());
+}
+
+// ---------- 传输加密 ----------
+// 轻量流加密：密钥流 = SipHash(配对码, nonce, 块序号) 与明文 XOR（加解密同一函数）。
+// 为不引入新依赖的自研轻量方案，用于局域网内防明文嗅探，非密码学强度。
+
+/// 密钥 = 请求方持有的本机配对码（X-Token），双方配对后均持有
+fn xor_crypt(key: &str, nonce: u64, data: &mut [u8]) {
+    for (i, chunk) in data.chunks_mut(8).enumerate() {
+        let mut h = DefaultHasher::new();
+        key.hash(&mut h);
+        nonce.hash(&mut h);
+        i.hash(&mut h);
+        let ks = h.finish().to_le_bytes();
+        for (b, k) in chunk.iter_mut().zip(ks.iter()) {
+            *b ^= k;
+        }
+    }
+}
+
+/// 由时间 + 自增计数器生成随机 nonce（无需 rand 依赖）
+fn gen_nonce(key: &str) -> u64 {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let mut h = DefaultHasher::new();
+    key.hash(&mut h);
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() ^ u64::from(d.subsec_nanos()))
+        .unwrap_or(0)
+        .hash(&mut h);
+    COUNTER.fetch_add(1, Ordering::SeqCst).hash(&mut h);
+    h.finish()
+}
+
+/// 共享方开启「加密传输」时：加密响应体并返回加密标记头；否则原样返回
+fn maybe_encrypt_body(
+    app: &AppHandle,
+    headers: &HashMap<String, String>,
+    body: &[u8],
+) -> (Vec<u8>, String) {
+    let on = app
+        .state::<AppState>()
+        .lan
+        .settings
+        .lock()
+        .unwrap()
+        .encrypt_transfer;
+    let token = headers.get("x-token");
+    if !on || body.is_empty() {
+        return (body.to_vec(), String::new());
+    }
+    let Some(token) = token else {
+        return (body.to_vec(), String::new());
+    };
+    let nonce = gen_nonce(token);
+    let mut data = body.to_vec();
+    xor_crypt(token, nonce, &mut data);
+    (data, format!("X-Enc: 1\r\nX-Enc-Nonce: {nonce:016x}\r\n"))
+}
+
+/// 拉取方：响应带加密标记时用对方配对码原地解密
+fn decrypt_if_needed(resp: &mut HttpResp, token: Option<&str>) {
+    if let (Some(nonce), Some(t)) = (resp.enc_nonce, token) {
+        xor_crypt(t, nonce, &mut resp.body);
+    }
 }
 
 /// 读取 HTTP 请求行 + 头部（只支持 GET，无 body）。返回 (path, query, headers)
@@ -859,22 +961,38 @@ fn handle_clips(
         .get("since")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
+    // 可选参数（默认行为与旧协议一致，不影响安卓端）：
+    //   until — 毫秒时间戳上界（含），默认不限
+    //   limit — 单次最大条数，默认 CLIPS_PAGE_LIMIT，上限 5000
+    //   order=desc — 按日期取最新优先（默认升序）
+    let until_ms: i64 = query
+        .get("until")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(i64::MAX);
+    let limit: i64 = query
+        .get("limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(CLIPS_PAGE_LIMIT)
+        .clamp(1, 5000);
+    let desc = query.get("order").is_some_and(|v| v == "desc");
     let requester = headers.get("x-device-id").cloned().unwrap_or_default();
     let state = app.state::<AppState>();
     let my_id = state.lan.settings.lock().unwrap().device_id.clone();
     let db = state.db.lock().unwrap();
-    let mut stmt = match db.prepare(
+    let sql = format!(
         "SELECT id, kind, content, LENGTH(image), created_at, remote_device_id, remote_id
-         FROM clips WHERE created_at * 1000 > ?1
-         ORDER BY created_at LIMIT ?2",
-    ) {
+         FROM clips WHERE created_at * 1000 > ?1 AND created_at * 1000 <= ?2
+         ORDER BY created_at {} LIMIT ?3",
+        if desc { "DESC" } else { "ASC" }
+    );
+    let mut stmt = match db.prepare(&sql) {
         Ok(s) => s,
         Err(_) => {
             respond_json(stream, 200, "[]");
             return;
         }
     };
-    let rows = stmt.query_map(params![since_ms, CLIPS_PAGE_LIMIT], |r| {
+    let rows = stmt.query_map(params![since_ms, until_ms, limit], |r| {
         Ok((
             r.get::<_, i64>(0)?,
             r.get::<_, String>(1)?,
@@ -916,7 +1034,9 @@ fn handle_clips(
             list.push(o);
         }
     }
-    respond_json(stream, 200, &Value::Array(list).to_string());
+    let body = Value::Array(list).to_string();
+    let (data, extra) = maybe_encrypt_body(app, headers, body.as_bytes());
+    respond_extra(stream, 200, "application/json", &data, &extra);
 }
 
 fn handle_file(
@@ -954,7 +1074,10 @@ fn handle_file(
         .flatten();
     drop(db);
     match img {
-        Some(bytes) => respond(stream, 200, "application/octet-stream", &bytes),
+        Some(bytes) => {
+            let (data, extra) = maybe_encrypt_body(app, headers, &bytes);
+            respond_extra(stream, 200, "application/octet-stream", &data, &extra);
+        }
         None => respond_json(stream, 404, "File Not Found"),
     }
 }
@@ -998,6 +1121,8 @@ impl std::fmt::Display for LanErr {
 struct HttpResp {
     code: u16,
     body: Vec<u8>,
+    /// 响应带 X-Enc-Nonce 时为加密体，需用对方配对码解密
+    enc_nonce: Option<u64>,
 }
 
 /// 发起 GET 请求，自动带本机设备信息头；带 token 时附上本机配对码（供自动反向配对）
@@ -1101,10 +1226,15 @@ fn http_get_raw(
         .and_then(|c| c.parse().ok())
         .unwrap_or(0);
     let mut content_len: Option<u64> = None;
+    let mut enc_nonce: Option<u64> = None;
     for line in lines {
         if let Some(idx) = line.find(':') {
-            if line[..idx].trim().eq_ignore_ascii_case("content-length") {
-                content_len = line[idx + 1..].trim().parse().ok();
+            let name = line[..idx].trim();
+            let value = line[idx + 1..].trim();
+            if name.eq_ignore_ascii_case("content-length") {
+                content_len = value.parse().ok();
+            } else if name.eq_ignore_ascii_case("x-enc-nonce") {
+                enc_nonce = u64::from_str_radix(value, 16).ok();
             }
         }
     }
@@ -1129,7 +1259,11 @@ fn http_get_raw(
             }
         },
     }
-    Ok(HttpResp { code, body })
+    Ok(HttpResp {
+        code,
+        body,
+        enc_nonce,
+    })
 }
 
 /// 解析 403 响应体：区分"对方关了共享"/"对方取消了配对"/"对方拉黑了本机"
@@ -1173,17 +1307,35 @@ fn fetch_info(host: &str, port: u16, timeout: Duration) -> Result<Value, LanErr>
     }
 }
 
-/// 增量拉取记录
-fn fetch_clips(app: &AppHandle, device: &LanDevice, since: i64) -> Result<Vec<Value>, LanErr> {
+/// 拉取记录：since 毫秒下界（不含）；until/limit/desc 为可选扩展（见 handle_clips）
+fn fetch_clips(
+    app: &AppHandle,
+    device: &LanDevice,
+    since: i64,
+    until: Option<i64>,
+    limit: Option<i64>,
+    desc: bool,
+) -> Result<Vec<Value>, LanErr> {
     let host = device.host.clone().ok_or_else(|| LanErr::Net("设备离线".into()))?;
-    let resp = http_get(
+    let mut path = format!("/clips?since={since}");
+    if let Some(u) = until {
+        path.push_str(&format!("&until={u}"));
+    }
+    if let Some(l) = limit {
+        path.push_str(&format!("&limit={l}"));
+    }
+    if desc {
+        path.push_str("&order=desc");
+    }
+    let mut resp = http_get(
         app,
         &host,
         device.port,
-        &format!("/clips?since={since}"),
+        &path,
         device.token.as_deref(),
-        Duration::from_secs(5),
+        Duration::from_secs(10),
     )?;
+    decrypt_if_needed(&mut resp, device.token.as_deref());
     match resp.code {
         200 => {
             let v: Value = serde_json::from_slice(&resp.body)
@@ -1234,7 +1386,7 @@ fn request_pair(app: &AppHandle, device: &LanDevice) -> Result<Option<String>, L
 /// 下载媒体文件（内存返回，调用方负责落盘/入库）
 fn download_file(app: &AppHandle, device: &LanDevice, remote_id: i64) -> Result<Vec<u8>, LanErr> {
     let host = device.host.clone().ok_or_else(|| LanErr::Net("设备离线".into()))?;
-    let resp = http_get(
+    let mut resp = http_get(
         app,
         &host,
         device.port,
@@ -1242,6 +1394,7 @@ fn download_file(app: &AppHandle, device: &LanDevice, remote_id: i64) -> Result<
         device.token.as_deref(),
         Duration::from_secs(5),
     )?;
+    decrypt_if_needed(&mut resp, device.token.as_deref());
     match resp.code {
         200 => Ok(resp.body),
         401 => Err(LanErr::NeedPairing),
@@ -1497,10 +1650,27 @@ fn merged_devices(state: &AppState) -> Vec<(LanDevice, bool, i64)> {
 pub struct SyncResult {
     pub added: usize,
     pub skipped: usize,
+    /// 未设置文件存储路径：本次仅同步了文字（结果消息里提示用户）
+    pub dir_missing: bool,
 }
 
-/// 同步一台设备：增量拉取并入库
-fn sync_device(app: &AppHandle, device_id: &str) -> Result<SyncResult, LanErr> {
+/// 手动同步方式（前端设置页「同步」按钮弹窗选择）
+#[derive(Deserialize, Clone, Debug, Default)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SyncMode {
+    /// 增量：从上次同步游标继续（默认，自动同步也用此模式）
+    #[default]
+    Incremental,
+    /// 最近 N 条：不按增量游标过滤，直接按日期取最新 N 条
+    Recent { count: i64 },
+    /// 指定某天：start_ms/end_ms 由前端按本地时区算好（end_ms 含）
+    Day { start_ms: i64, end_ms: i64 },
+    /// 全部：分页拉完对方全部记录
+    All,
+}
+
+/// 同步一台设备：按指定模式拉取并入库
+fn sync_device(app: &AppHandle, device_id: &str, mode: &SyncMode) -> Result<SyncResult, LanErr> {
     let state = app.state::<AppState>();
     {
         let s = state.lan.settings.lock().unwrap();
@@ -1530,44 +1700,123 @@ fn sync_device(app: &AppHandle, device_id: &str) -> Result<SyncResult, LanErr> {
     };
     state.lan.syncing.lock().unwrap().insert(device_id.to_string());
     emit_state_changed(app);
-    let result = sync_device_inner(app, device_id, &device);
+    let result = sync_device_inner(app, device_id, &device, mode);
     state.lan.syncing.lock().unwrap().remove(device_id);
     emit_state_changed(app);
     result
+}
+
+/// 拉取一页并处理 Unpaired 副作用（对方取消配对时本地同步解除）
+fn fetch_page(
+    app: &AppHandle,
+    device_id: &str,
+    device: &LanDevice,
+    since: i64,
+    until: Option<i64>,
+    limit: Option<i64>,
+    desc: bool,
+) -> Result<Vec<Value>, LanErr> {
+    match fetch_clips(app, device, since, until, limit, desc) {
+        Ok(c) => Ok(c),
+        Err(LanErr::Unpaired) => {
+            // 对方已取消与本机的配对：本地同步解除配对状态
+            let state = app.state::<AppState>();
+            let mut s = state.lan.settings.lock().unwrap();
+            s.paired.remove(device_id);
+            drop(s);
+            save_settings(&state);
+            emit_state_changed(app);
+            Err(LanErr::Unpaired)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 fn sync_device_inner(
     app: &AppHandle,
     device_id: &str,
     device: &LanDevice,
+    mode: &SyncMode,
 ) -> Result<SyncResult, LanErr> {
     let state = app.state::<AppState>();
-    let since = state
-        .lan
-        .settings
-        .lock()
-        .unwrap()
-        .last_sync
-        .get(device_id)
-        .copied()
-        .unwrap_or(0);
-    let clips = match fetch_clips(app, device, since) {
-        Ok(c) => c,
-        Err(LanErr::Unpaired) => {
-            // 对方已取消与本机的配对：本地同步解除配对状态
-            let mut s = state.lan.settings.lock().unwrap();
-            s.paired.remove(device_id);
-            drop(s);
-            save_settings(&state);
-            emit_state_changed(app);
-            return Err(LanErr::Unpaired);
-        }
-        Err(e) => return Err(e),
+    // 增量模式用上次同步游标；其余模式不走游标——不按增量条件过滤，直接按日期取数据
+    let since = match mode {
+        SyncMode::Incremental => state
+            .lan
+            .settings
+            .lock()
+            .unwrap()
+            .last_sync
+            .get(device_id)
+            .copied()
+            .unwrap_or(0),
+        _ => 0,
     };
+
+    // 按模式确定要拉取的页（最近 N 条 / 指定某天 / 全部 都是一次性拉取，全部模式单独分页）
+    let mut pages: Vec<Vec<Value>> = Vec::new();
+    match mode {
+        SyncMode::Incremental => {
+            pages.push(fetch_page(app, device_id, device, since, None, None, false)?);
+        }
+        SyncMode::Recent { count } => {
+            // 最新优先，取前 N 条
+            pages.push(fetch_page(
+                app,
+                device_id,
+                device,
+                0,
+                None,
+                Some((*count).clamp(1, 5000)),
+                true,
+            )?);
+        }
+        SyncMode::Day { start_ms, end_ms } => {
+            // 服务端语义为 since 不含 / until 含，故下界减 1ms 覆盖整天
+            pages.push(fetch_page(
+                app,
+                device_id,
+                device,
+                start_ms - 1,
+                Some(*end_ms),
+                Some(5000),
+                true,
+            )?);
+        }
+        SyncMode::All => {
+            // 分页拉完全部：游标回退 1ms 让页边界重叠一条，入库按内容哈希去重
+            let mut cursor: i64 = 0;
+            loop {
+                let page = fetch_page(
+                    app,
+                    device_id,
+                    device,
+                    cursor,
+                    None,
+                    Some(CLIPS_PAGE_LIMIT),
+                    false,
+                )?;
+                let len = page.len();
+                let max_ts = page
+                    .iter()
+                    .filter_map(|o| o.get("timestamp").and_then(|v| v.as_i64()))
+                    .max();
+                pages.push(page);
+                if len < CLIPS_PAGE_LIMIT as usize {
+                    break;
+                }
+                match max_ts {
+                    Some(ts) if ts > cursor => cursor = ts - 1,
+                    _ => break,
+                }
+            }
+        }
+    }
+
     let mut added = 0;
     let mut skipped = 0;
     let mut max_ts = since;
-    for obj in &clips {
+    for obj in pages.iter().flatten() {
         let ts = obj.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0);
         max_ts = max_ts.max(ts);
         match import_clip(app, obj, device) {
@@ -1575,21 +1824,53 @@ fn sync_device_inner(
             false => skipped += 1,
         }
     }
-    {
+    // 只有增量模式推进游标；手动范围同步不动游标，避免后续自动增量同步漏拉
+    if matches!(mode, SyncMode::Incremental) {
         let mut s = state.lan.settings.lock().unwrap();
         s.last_sync.insert(device_id.to_string(), max_ts);
+        drop(s);
+        save_settings(&state);
     }
-    save_settings(&state);
+    let dir_missing = state
+        .lan
+        .settings
+        .lock()
+        .unwrap()
+        .download_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .is_none();
     if added > 0 {
         let _ = app.emit("clip-added", ());
     }
-    Ok(SyncResult { added, skipped })
+    Ok(SyncResult {
+        added,
+        skipped,
+        dir_missing,
+    })
 }
 
 /// 导入一条远端记录；返回 true = 新增，false = 去重跳过
 fn import_clip(app: &AppHandle, obj: &Value, device: &LanDevice) -> bool {
     let state = app.state::<AppState>();
-    let my_id = state.lan.settings.lock().unwrap().device_id.clone();
+    // 同步设置快照：类型开关 + 大小上限 + 文件保存目录
+    let (my_id, allow_text, allow_image, allow_media, allow_other, max_bytes, dl_dir) = {
+        let s = state.lan.settings.lock().unwrap();
+        (
+            s.device_id.clone(),
+            s.sync_text,
+            s.sync_image,
+            s.sync_media,
+            s.sync_other,
+            s.max_file_mb.max(1).saturating_mul(1024 * 1024),
+            s.download_dir
+                .as_deref()
+                .map(str::trim)
+                .filter(|d| !d.is_empty())
+                .map(PathBuf::from),
+        )
+    };
     let get_str = |key: &str| -> Option<String> {
         obj.get(key)
             .filter(|v| !v.is_null())
@@ -1608,6 +1889,9 @@ fn import_clip(app: &AppHandle, obj: &Value, device: &LanDevice) -> bool {
     let remote_id = obj.get("remoteId").and_then(|v| v.as_i64());
 
     if wire_type == WIRE_TEXT {
+        if !allow_text {
+            return false;
+        }
         let Some(content) = text else {
             return false;
         };
@@ -1630,12 +1914,27 @@ fn import_clip(app: &AppHandle, obj: &Value, device: &LanDevice) -> bool {
         );
     }
 
+    // 未设置文件存储路径：仅同步文字，其余类型一律跳过
+    let Some(dl_dir) = dl_dir else {
+        return false;
+    };
+    // 同步类型过滤：图片 / 影视（视频+音频）/ 其他文件
+    let type_allowed = match wire_type {
+        WIRE_IMAGE => allow_image,
+        WIRE_VIDEO | WIRE_AUDIO => allow_media,
+        _ => allow_other,
+    };
+    if !type_allowed {
+        return false;
+    }
+
     // 图片 / 文件 / 视频 / 音频：先下载，去重后入库
     let Some(file_name) = get_str("fileName") else {
         return false;
     };
     let expected_size = obj.get("fileSize").and_then(|v| v.as_u64()).unwrap_or(0);
-    if expected_size > MAX_REMOTE_FILE {
+    // 超过同步大小上限（或协议硬上限）的文件不同步
+    if expected_size > max_bytes || expected_size > MAX_REMOTE_FILE {
         return false;
     }
     let Some(remote_record_id) = obj.get("id").and_then(|v| v.as_i64()) else {
@@ -1674,21 +1973,12 @@ fn import_clip(app: &AppHandle, obj: &Value, device: &LanDevice) -> bool {
         );
     }
 
-    // 文件/视频/音频：落盘到 db 目录下的 lan-files/，以路径形式入库
-    let dir = state
-        .config
-        .lock()
-        .unwrap()
-        .db_dir
-        .clone()
-        .map(PathBuf::from)
-        .unwrap_or_else(exe_dir)
-        .join("lan-files");
-    if std::fs::create_dir_all(&dir).is_err() {
+    // 文件/视频/音频：落盘到设置的文件存储路径，以路径形式入库
+    if std::fs::create_dir_all(&dl_dir).is_err() {
         return false;
     }
     let ext = file_name.rsplit_once('.').map(|(_, e)| e).unwrap_or("bin");
-    let dest = dir.join(format!("{}_lan.{}", timestamp_ms, sanitize_ext(ext)));
+    let dest = dl_dir.join(format!("{}_lan.{}", timestamp_ms, sanitize_ext(ext)));
     if std::fs::write(&dest, &bytes).is_err() {
         return false;
     }
@@ -1750,10 +2040,16 @@ fn store_remote(
     .is_ok()
 }
 
-/// 自动同步线程：30s 一轮，对所有已配对且在线且对方开了共享的设备增量拉取
+/// 自动同步线程：按设置的间隔（默认 30s）一轮，对所有已配对且在线且对方开了共享的设备增量拉取
 fn auto_sync_loop(app: AppHandle) {
     loop {
-        std::thread::sleep(AUTO_SYNC_INTERVAL);
+        // 每轮开始前读最新间隔；调大后当前这轮睡眠不受影响，下一轮生效
+        let interval = {
+            let state = app.state::<AppState>();
+            let secs = state.lan.settings.lock().unwrap().auto_sync_interval_secs;
+            Duration::from_secs(secs.clamp(MIN_AUTO_SYNC_SECS, MAX_AUTO_SYNC_SECS))
+        };
+        std::thread::sleep(interval);
         let state = app.state::<AppState>();
         if !state.lan.settings.lock().unwrap().auto_sync {
             continue;
@@ -1764,7 +2060,7 @@ fn auto_sync_loop(app: AppHandle) {
             .map(|(d, _, _)| d.device_id)
             .collect();
         for id in targets {
-            if let Err(e) = sync_device(&app, &id) {
+            if let Err(e) = sync_device(&app, &id, &SyncMode::Incremental) {
                 eprintln!("[lan] 自动同步 {id} 失败: {e}");
             }
         }
@@ -1775,6 +2071,20 @@ fn auto_sync_loop(app: AppHandle) {
 
 /// 启动 LAN 模块的全部后台线程（beacon 收发 + 自动同步），并按开关启停服务
 pub fn start(app: &AppHandle) {
+    // 文件保存目录从未配置过（None）时，默认填系统下载目录；用户清空（Some("")）则不覆盖
+    {
+        let state = app.state::<AppState>();
+        let mut s = state.lan.settings.lock().unwrap();
+        if s.download_dir.is_none() {
+            s.download_dir = app
+                .path()
+                .download_dir()
+                .ok()
+                .map(|p| p.to_string_lossy().to_string());
+            drop(s);
+            save_settings(&state);
+        }
+    }
     let app2 = app.clone();
     std::thread::spawn(move || beacon_receiver_loop(app2, false));
     let app2 = app.clone();
@@ -1821,8 +2131,19 @@ pub struct LanStateDto {
     local_ip: String,
     discoverable: bool,
     sharing: bool,
+    encrypt_transfer: bool,
     auto_sync: bool,
     auto_accept_pair: bool,
+    /// 自动同步间隔（秒）
+    auto_sync_interval_secs: u64,
+    /// 文件存储路径（空串 = 未设置，仅同步文字）
+    download_dir: String,
+    /// 同步文件大小上限（MB）
+    max_file_mb: u64,
+    sync_text: bool,
+    sync_image: bool,
+    sync_media: bool,
+    sync_other: bool,
     devices: Vec<DeviceDto>,
     blocked: Vec<BlockedDto>,
 }
@@ -1864,8 +2185,16 @@ fn build_state_dto(state: &AppState) -> LanStateDto {
         local_ip: local_ip().unwrap_or_default(),
         discoverable: s.discoverable,
         sharing: s.sharing,
+        encrypt_transfer: s.encrypt_transfer,
         auto_sync: s.auto_sync,
         auto_accept_pair: s.auto_accept_pair,
+        auto_sync_interval_secs: s.auto_sync_interval_secs,
+        download_dir: s.download_dir.clone().unwrap_or_default(),
+        max_file_mb: s.max_file_mb,
+        sync_text: s.sync_text,
+        sync_image: s.sync_image,
+        sync_media: s.sync_media,
+        sync_other: s.sync_other,
         devices,
         blocked,
     }
@@ -1882,10 +2211,19 @@ pub fn lan_get_state(state: State<AppState>) -> LanStateDto {
 pub struct LanSettingsPatch {
     discoverable: Option<bool>,
     sharing: Option<bool>,
+    encrypt_transfer: Option<bool>,
     auto_sync: Option<bool>,
     auto_accept_pair: Option<bool>,
+    auto_sync_interval_secs: Option<u64>,
     device_name: Option<String>,
     server_port: Option<u16>,
+    /// 文件存储路径：Some(空串) = 清空（仅同步文字）
+    download_dir: Option<String>,
+    max_file_mb: Option<u64>,
+    sync_text: Option<bool>,
+    sync_image: Option<bool>,
+    sync_media: Option<bool>,
+    sync_other: Option<bool>,
 }
 
 #[tauri::command]
@@ -1903,8 +2241,14 @@ pub fn lan_update_settings(
         if let Some(v) = patch.sharing {
             s.sharing = v;
         }
+        if let Some(v) = patch.encrypt_transfer {
+            s.encrypt_transfer = v;
+        }
         if let Some(v) = patch.auto_sync {
             s.auto_sync = v;
+        }
+        if let Some(v) = patch.auto_sync_interval_secs {
+            s.auto_sync_interval_secs = v.clamp(MIN_AUTO_SYNC_SECS, MAX_AUTO_SYNC_SECS);
         }
         if let Some(v) = patch.auto_accept_pair {
             s.auto_accept_pair = v;
@@ -1920,6 +2264,25 @@ pub fn lan_update_settings(
                 s.server_port = port;
                 port_changed = true;
             }
+        }
+        if let Some(dir) = patch.download_dir {
+            // 原样保存（含空串 = 用户清空）；首尾空白按未设置处理
+            s.download_dir = Some(dir.trim().to_string());
+        }
+        if let Some(mb) = patch.max_file_mb {
+            s.max_file_mb = mb.clamp(1, 1024);
+        }
+        if let Some(v) = patch.sync_text {
+            s.sync_text = v;
+        }
+        if let Some(v) = patch.sync_image {
+            s.sync_image = v;
+        }
+        if let Some(v) = patch.sync_media {
+            s.sync_media = v;
+        }
+        if let Some(v) = patch.sync_other {
+            s.sync_other = v;
         }
     }
     save_settings(&state);
@@ -2223,11 +2586,22 @@ pub async fn lan_unpair(app: AppHandle, device_id: String) -> Result<(), String>
     .map_err(|e| e.to_string())
 }
 
-/// 立即同步一台设备
+/// 立即同步一台设备（mode 缺省为增量；可选 最近N条/指定某天/全部）
 #[tauri::command]
-pub async fn lan_sync_now(app: AppHandle, device_id: String) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || match sync_device(&app, &device_id) {
-        Ok(r) => Ok(format!("同步完成：新增 {} 条，跳过 {} 条", r.added, r.skipped)),
+pub async fn lan_sync_now(
+    app: AppHandle,
+    device_id: String,
+    mode: Option<SyncMode>,
+) -> Result<String, String> {
+    let mode = mode.unwrap_or_default();
+    tauri::async_runtime::spawn_blocking(move || match sync_device(&app, &device_id, &mode) {
+        Ok(r) => {
+            let mut msg = format!("同步完成：新增 {} 条，跳过 {} 条", r.added, r.skipped);
+            if r.dir_missing {
+                msg.push_str("\n未设置文件存储路径，本次仅同步了文字（可在设置页「同步选项」中配置）");
+            }
+            Ok(msg)
+        }
         Err(e) => Err(e.to_string()),
     })
     .await

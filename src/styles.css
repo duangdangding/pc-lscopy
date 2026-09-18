@@ -819,3 +819,41 @@ body {
 .settings-footer[hidden] {
   display: none;
 }
+
+/* ---------- 同步方式选择弹窗 ---------- */
+.sync-opts {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 14px;
+  text-align: left;
+}
+
+.sync-opts label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  line-height: 1.5;
+}
+
+.sync-opts input[type="number"],
+.sync-opts input[type="date"] {
+  width: 72px;
+  padding: 3px 6px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.sync-opts input[type="date"] {
+  width: auto;
+}
+
+.sync-opts input:focus {
+  outline: none;
+  border-color: var(--accent);
+}

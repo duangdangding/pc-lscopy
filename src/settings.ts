@@ -209,14 +209,23 @@ interface LanStateDto {
   local_ip: string;
   discoverable: boolean;
   sharing: boolean;
+  encrypt_transfer: boolean;
   auto_sync: boolean;
   auto_accept_pair: boolean;
+  auto_sync_interval_secs: number;
+  download_dir: string;
+  max_file_mb: number;
+  sync_text: boolean;
+  sync_image: boolean;
+  sync_media: boolean;
+  sync_other: boolean;
   devices: LanDeviceDto[];
   blocked: { device_id: string; name: string; model: string | null }[];
 }
 
 const lanDiscoverableEl = $<HTMLInputElement>("#lan-discoverable");
 const lanSharingEl = $<HTMLInputElement>("#lan-sharing");
+const lanEncryptEl = $<HTMLInputElement>("#lan-encrypt");
 const lanAutoSyncEl = $<HTMLInputElement>("#lan-auto-sync");
 const lanAutoAcceptEl = $<HTMLInputElement>("#lan-auto-accept");
 const lanNameEl = $<HTMLInputElement>("#lan-name");
@@ -234,8 +243,56 @@ function lanPatch(patch: Record<string, unknown>) {
 
 lanDiscoverableEl.onchange = () => lanPatch({ discoverable: lanDiscoverableEl.checked });
 lanSharingEl.onchange = () => lanPatch({ sharing: lanSharingEl.checked });
+lanEncryptEl.onchange = () => lanPatch({ encrypt_transfer: lanEncryptEl.checked });
 lanAutoSyncEl.onchange = () => lanPatch({ auto_sync: lanAutoSyncEl.checked });
 lanAutoAcceptEl.onchange = () => lanPatch({ auto_accept_pair: lanAutoAcceptEl.checked });
+
+// 自动同步间隔（秒），失焦即生效
+const lanSyncIntervalEl = $<HTMLInputElement>("#lan-sync-interval");
+lanSyncIntervalEl.onchange = () => {
+  const secs = Math.floor(Number(lanSyncIntervalEl.value));
+  if (!Number.isFinite(secs) || secs < 5 || secs > 3600) {
+    alert("同步间隔范围 5–3600 秒");
+    return;
+  }
+  lanPatch({ auto_sync_interval_secs: secs });
+};
+
+// ---------- 同步选项 ----------
+const lanDlDirEl = $<HTMLInputElement>("#lan-dl-dir");
+const lanMaxFileEl = $<HTMLInputElement>("#lan-max-file");
+const lanSyncTextEl = $<HTMLInputElement>("#lan-sync-text");
+const lanSyncImageEl = $<HTMLInputElement>("#lan-sync-image");
+const lanSyncMediaEl = $<HTMLInputElement>("#lan-sync-media");
+const lanSyncOtherEl = $<HTMLInputElement>("#lan-sync-other");
+
+$("#lan-dl-dir-browse").addEventListener("click", async () => {
+  const dir = await open({ directory: true, title: "选择同步文件存储目录" });
+  if (typeof dir === "string") {
+    lanDlDirEl.value = dir;
+    lanPatch({ download_dir: dir });
+  }
+});
+$("#lan-dl-dir-save").addEventListener("click", () => {
+  lanPatch({ download_dir: lanDlDirEl.value.trim() });
+});
+$("#lan-dl-dir-clear").addEventListener("click", async () => {
+  if (!(await confirmDialog("清空文件存储路径后，同步时将仅同步文字。确定清空？"))) return;
+  lanDlDirEl.value = "";
+  lanPatch({ download_dir: "" });
+});
+lanMaxFileEl.onchange = () => {
+  const mb = Math.floor(Number(lanMaxFileEl.value));
+  if (!Number.isFinite(mb) || mb < 1) {
+    alert("大小上限最小为 1 MB");
+    return;
+  }
+  lanPatch({ max_file_mb: Math.min(mb, 1024) });
+};
+lanSyncTextEl.onchange = () => lanPatch({ sync_text: lanSyncTextEl.checked });
+lanSyncImageEl.onchange = () => lanPatch({ sync_image: lanSyncImageEl.checked });
+lanSyncMediaEl.onchange = () => lanPatch({ sync_media: lanSyncMediaEl.checked });
+lanSyncOtherEl.onchange = () => lanPatch({ sync_other: lanSyncOtherEl.checked });
 
 $("#lan-name-save").addEventListener("click", () => {
   const name = lanNameEl.value.trim();
@@ -361,6 +418,158 @@ function pairForm(device: LanDeviceDto): HTMLElement {
   return wrap;
 }
 
+// ---------- 同步方式选择 ----------
+
+type SyncModePayload =
+  | { kind: "incremental" }
+  | { kind: "recent"; count: number }
+  | { kind: "day"; start_ms: number; end_ms: number }
+  | { kind: "all" };
+
+// 「同步」按钮弹窗：增量 / 最近N条 / 指定某天 / 全部；取消返回 null
+function syncModeDialog(deviceName: string): Promise<SyncModePayload | null> {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "confirm-overlay";
+
+    const box = document.createElement("div");
+    box.className = "confirm-box";
+
+    const msg = document.createElement("div");
+    msg.className = "confirm-msg";
+    msg.textContent = `选择同步方式（${deviceName}）`;
+
+    const opts = document.createElement("div");
+    opts.className = "sync-opts";
+
+    const mkRadio = (value: string, checked = false) => {
+      const r = document.createElement("input");
+      r.type = "radio";
+      r.name = "sync-mode";
+      r.value = value;
+      r.checked = checked;
+      return r;
+    };
+
+    // 增量（保持原有行为）
+    const lInc = document.createElement("label");
+    lInc.append(
+      mkRadio("incremental", true),
+      document.createTextNode("增量更新（从上次同步位置继续）")
+    );
+
+    // 最近 N 条
+    const lRecent = document.createElement("label");
+    const rRecent = mkRadio("recent");
+    const num = document.createElement("input");
+    num.type = "number";
+    num.min = "1";
+    num.max = "5000";
+    num.value = "50";
+    const checkRecent = () => (rRecent.checked = true);
+    num.addEventListener("focus", checkRecent);
+    num.addEventListener("click", checkRecent);
+    lRecent.append(
+      rRecent,
+      document.createTextNode("最近"),
+      num,
+      document.createTextNode("条（按日期取最新）")
+    );
+
+    // 指定某天
+    const lDay = document.createElement("label");
+    const rDay = mkRadio("day");
+    const date = document.createElement("input");
+    date.type = "date";
+    const t = new Date();
+    const p2 = (n: number) => String(n).padStart(2, "0");
+    date.value = `${t.getFullYear()}-${p2(t.getMonth() + 1)}-${p2(t.getDate())}`;
+    const checkDay = () => (rDay.checked = true);
+    date.addEventListener("focus", checkDay);
+    date.addEventListener("click", checkDay);
+    lDay.append(rDay, document.createTextNode("指定日期"), date);
+
+    // 全部
+    const lAll = document.createElement("label");
+    lAll.append(
+      mkRadio("all"),
+      document.createTextNode("全部（对方设备所有记录，可能较慢）")
+    );
+
+    opts.append(lInc, lRecent, lDay, lAll);
+
+    const btns = document.createElement("div");
+    btns.className = "confirm-btns";
+    const cancel = document.createElement("button");
+    cancel.className = "btn";
+    cancel.textContent = "取消";
+    const ok = document.createElement("button");
+    ok.className = "btn primary";
+    ok.textContent = "开始同步";
+
+    const done = (v: SyncModePayload | null) => {
+      overlay.remove();
+      document.removeEventListener("keydown", onKey, true);
+      resolve(v);
+    };
+    const buildPayload = (): SyncModePayload | null | undefined => {
+      const v = opts.querySelector<HTMLInputElement>(
+        "input[name=sync-mode]:checked"
+      )!.value;
+      if (v === "recent") {
+        const n = Math.floor(Number(num.value));
+        if (!Number.isFinite(n) || n < 1) {
+          num.focus();
+          return undefined; // 输入非法：不关闭弹窗
+        }
+        return { kind: "recent", count: Math.min(n, 5000) };
+      }
+      if (v === "day") {
+        if (!date.value) {
+          date.focus();
+          return undefined;
+        }
+        // 按本地时区取当天 00:00:00.000 ~ 23:59:59.999
+        const [y, m, dd] = date.value.split("-").map(Number);
+        return {
+          kind: "day",
+          start_ms: new Date(y, m - 1, dd, 0, 0, 0, 0).getTime(),
+          end_ms: new Date(y, m - 1, dd, 23, 59, 59, 999).getTime(),
+        };
+      }
+      if (v === "all") return { kind: "all" };
+      return { kind: "incremental" };
+    };
+    const confirm = () => {
+      const payload = buildPayload();
+      if (payload !== undefined) done(payload);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        e.preventDefault();
+        done(null);
+      } else if (e.key === "Enter" && (e.target as HTMLElement).tagName !== "INPUT") {
+        e.stopPropagation();
+        e.preventDefault();
+        confirm();
+      }
+    };
+    cancel.onclick = () => done(null);
+    ok.onclick = confirm;
+    overlay.onclick = (e) => {
+      if (e.target === overlay) done(null);
+    };
+    document.addEventListener("keydown", onKey, true);
+
+    btns.append(cancel, ok);
+    box.append(msg, opts, btns);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    ok.focus();
+  });
+}
+
 function renderLanDevices(devices: LanDeviceDto[]) {
   lanDevicesEl.innerHTML = "";
   if (!devices.length) {
@@ -437,9 +646,11 @@ function renderLanDevices(devices: LanDeviceDto[]) {
     } else {
       const sync = lanBtn("同步");
       sync.onclick = async () => {
+        const mode = await syncModeDialog(d.name || "未知设备");
+        if (!mode) return;
         sync.disabled = true;
         try {
-          const msg = await invoke<string>("lan_sync_now", { deviceId: d.device_id });
+          const msg = await invoke<string>("lan_sync_now", { deviceId: d.device_id, mode });
           alert(msg);
         } catch (e) {
           alert(`同步失败: ${e}`);
@@ -477,8 +688,18 @@ async function refreshLanState() {
     const s = await invoke<LanStateDto>("lan_get_state");
     lanDiscoverableEl.checked = s.discoverable;
     lanSharingEl.checked = s.sharing;
+    lanEncryptEl.checked = s.encrypt_transfer;
     lanAutoSyncEl.checked = s.auto_sync;
     lanAutoAcceptEl.checked = s.auto_accept_pair;
+    if (!lanLoaded || document.activeElement !== lanSyncIntervalEl)
+      lanSyncIntervalEl.value = String(s.auto_sync_interval_secs);
+    if (!lanLoaded || document.activeElement !== lanDlDirEl) lanDlDirEl.value = s.download_dir;
+    if (!lanLoaded || document.activeElement !== lanMaxFileEl)
+      lanMaxFileEl.value = String(s.max_file_mb);
+    lanSyncTextEl.checked = s.sync_text;
+    lanSyncImageEl.checked = s.sync_image;
+    lanSyncMediaEl.checked = s.sync_media;
+    lanSyncOtherEl.checked = s.sync_other;
     if (!lanLoaded || document.activeElement !== lanNameEl) lanNameEl.value = s.device_name;
     if (!lanLoaded || document.activeElement !== lanPortEl) lanPortEl.value = String(s.server_port);
     lanTokenEl.textContent = s.pairing_token;

@@ -140,7 +140,13 @@
           <h2>同步开关</h2>
           <label class="check"><input id="lan-discoverable" type="checkbox" /> 可被其他设备发现（广播本机信息）</label>
           <label class="check"><input id="lan-sharing" type="checkbox" /> 共享剪贴板（允许已配对设备拉取本机内容）</label>
-          <label class="check"><input id="lan-auto-sync" type="checkbox" /> 自动同步（每 30 秒拉取已配对设备的新内容）</label>
+          <label class="check"><input id="lan-encrypt" type="checkbox" /> 加密传输（共享内容加密发送，对方需为新版 lscopy）</label>
+          <label class="check"><input id="lan-auto-sync" type="checkbox" /> 自动同步（定时拉取已配对设备的新内容）</label>
+          <span class="lan-inline" style="margin-left: 24px">
+            <span class="desc">同步间隔</span>
+            <input id="lan-sync-interval" type="number" min="5" max="3600" style="width: 70px" />
+            <span class="desc">秒（5–3600，默认 30）</span>
+          </span>
           <label class="check"><input id="lan-auto-accept" type="checkbox" /> 自动同意配对请求（开启后其他设备无需输入配对码即可配对）</label>
           <p class="desc">与安卓端「共享剪贴板」及其他电脑互通。所有开关即时生效，无需点击保存。</p>
         </section>
@@ -172,6 +178,33 @@
               <button id="lan-port-save" class="btn small">应用</button>
             </span>
           </div>
+        </section>
+
+        <section class="card">
+          <h2>同步选项</h2>
+          <div class="lan-info-grid">
+            <span class="lan-label">文件存储路径</span>
+            <span class="lan-inline">
+              <input id="lan-dl-dir" type="text" placeholder="留空则仅同步文字" style="width: 240px" />
+              <button id="lan-dl-dir-browse" class="btn small">浏览</button>
+              <button id="lan-dl-dir-save" class="btn small">保存</button>
+              <button id="lan-dl-dir-clear" class="btn small">清空</button>
+            </span>
+
+            <span class="lan-label">文件大小上限</span>
+            <span class="lan-inline">
+              <input id="lan-max-file" type="number" min="1" max="1024" style="width: 70px" />
+              <span class="desc">MB，超过大小的文件不会同步</span>
+            </span>
+          </div>
+          <p class="desc" style="margin: 10px 0 4px">同步类型</p>
+          <div class="row" style="gap: 16px">
+            <label class="check"><input id="lan-sync-text" type="checkbox" /> 文字</label>
+            <label class="check"><input id="lan-sync-image" type="checkbox" /> 图片</label>
+            <label class="check"><input id="lan-sync-media" type="checkbox" /> 影视（视频/音频）</label>
+            <label class="check"><input id="lan-sync-other" type="checkbox" /> 其他文件</label>
+          </div>
+          <p class="desc">同步下载的图片/文件统一存到「文件存储路径」；未设置路径时仅同步文字，同步后会提示。</p>
         </section>
 
         <section class="card">
