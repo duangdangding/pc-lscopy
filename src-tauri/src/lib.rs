@@ -1229,8 +1229,39 @@ fn simulate_paste() {
             Key::Control
         };
         let _ = enigo.key(modifier, Direction::Press);
-        let _ = enigo.key(Key::Unicode('v'), Direction::Click);
+        // macOS 上必须用物理键码 Other(0x09)（kVK_ANSI_V）：Key::Unicode 会走
+        // enigo 0.2.1 的 get_layoutdependent_keycode → TIS 键盘布局查询，
+        // 在后台线程 TISGetInputSourceProperty 可能返回 NULL，
+        // release 版直接 CFDataGetBytePtr(NULL) 段错误（进程闪退）
+        #[cfg(target_os = "macos")]
+        let v_key = Key::Other(9);
+        #[cfg(not(target_os = "macos"))]
+        let v_key = Key::Unicode('v');
+        let _ = enigo.key(v_key, Direction::Click);
         let _ = enigo.key(modifier, Direction::Release);
+    }
+}
+
+// 模拟粘贴入口：macOS 上 enigo 初始化会调用 AppKit（NSEvent::doubleClickInterval），
+// AppKit 应在主线程访问，故 mac 调度到主线程执行并同步等待；其他平台原线程执行。
+fn simulate_paste_safe(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+        if app
+            .run_on_main_thread(move || {
+                simulate_paste();
+                let _ = tx.send(());
+            })
+            .is_ok()
+        {
+            let _ = rx.recv();
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        simulate_paste();
     }
 }
 
@@ -1322,7 +1353,7 @@ fn paste_worker(app: AppHandle) {
         }
         // 等焦点 settling 即可，50ms 在响应速度和可靠性之间比较平衡
         std::thread::sleep(Duration::from_millis(50));
-        simulate_paste();
+        simulate_paste_safe(&app);
     }
     state.paste_running.store(false, Ordering::SeqCst);
     if *state.paste_pending.lock().unwrap() && !state.paste_running.swap(true, Ordering::SeqCst) {
