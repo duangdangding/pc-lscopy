@@ -21,6 +21,11 @@ use tauri_plugin_opener::OpenerExt;
 
 mod lan;
 
+// macOS 的 NSPasteboard 不是线程安全的：后台线程读写会与应用主线程（WebKit 周期性
+// 轮询 changeCount）竞争，导致内存损坏闪退（tauri-plugins-workspace#3205）。
+// 进程内所有 arboard 读写统一走这把锁串行化；mac 上写操作还会调度到主线程执行。
+static CLIPBOARD_LOCK: Mutex<()> = Mutex::new(());
+
 // ---------- 配置 ----------
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -958,7 +963,10 @@ fn start_watcher(app: AppHandle) {
                 (cfg.enabled, is_excluded(&cfg), cfg.max_items)
             };
 
-            let Some(cand) = read_clipboard(&mut cb) else {
+            let Some(cand) = ({
+                let _g = CLIPBOARD_LOCK.lock().unwrap();
+                read_clipboard(&mut cb)
+            }) else {
                 continue;
             };
             let h = cand.hash();
@@ -1012,6 +1020,7 @@ fn start_watcher(app: AppHandle) {
 // 删除记录 / 重新开启记录时调用：读取当前系统剪贴板内容哈希并加入忽略集合
 fn ignore_current_clipboard(state: &AppState) {
     let h = (|| {
+        let _g = CLIPBOARD_LOCK.lock().unwrap();
         let mut cb = Clipboard::new().ok()?;
         read_clipboard(&mut cb).map(|c| c.hash())
     })();
@@ -1156,9 +1165,32 @@ fn set_clipboard_by_id(state: &AppState, id: i64) -> Result<(), String> {
     Ok(())
 }
 
+// 写剪贴板（粘贴/仅复制共用入口）：
+// 全程持 CLIPBOARD_LOCK 与监听线程的读互斥；macOS 上 NSPasteboard 只允许主线程访问，
+// 否则与 WebKit 主线程的剪贴板轮询竞争导致闪退，故 mac 调度到主线程执行并同步等待结果。
+fn set_clipboard_by_id_safe(app: &AppHandle, id: i64) -> Result<(), String> {
+    let _guard = CLIPBOARD_LOCK.lock().unwrap();
+    #[cfg(target_os = "macos")]
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let app2 = app.clone();
+        app.run_on_main_thread(move || {
+            let st = app2.state::<AppState>();
+            let _ = tx.send(set_clipboard_by_id(&st, id));
+        })
+        .map_err(|e| format!("调度主线程失败: {e}"))?;
+        rx.recv().map_err(|_| "主线程写剪贴板无响应".to_string())?
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let st = app.state::<AppState>();
+        set_clipboard_by_id(&st, id)
+    }
+}
+
 #[tauri::command]
-fn copy_clip(state: State<AppState>, id: i64) -> Result<(), String> {
-    set_clipboard_by_id(&state, id)
+fn copy_clip(app: AppHandle, id: i64) -> Result<(), String> {
+    set_clipboard_by_id_safe(&app, id)
 }
 
 // 前台窗口句柄读取/归还（Windows）
@@ -1260,7 +1292,7 @@ fn paste_clip(state: State<AppState>, app: AppHandle, id: i64) -> Result<(), Str
         }
     }
     // 剪贴板内容立即更新
-    set_clipboard_by_id(&state, id)?;
+    set_clipboard_by_id_safe(&app, id)?;
     *state.paste_pending.lock().unwrap() = true;
 
     // 已有粘贴 worker 在跑：标记排队即可，它完成后会立刻补下一次
@@ -1937,7 +1969,7 @@ pub fn run() {
             TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
-                .tooltip(&format!("共享剪贴板 ({})", format_hotkey_display(&config.hotkey)))
+                .tooltip(format!("共享剪贴板 ({})", format_hotkey_display(&config.hotkey)))
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => toggle_window(app),
                     "toggle" => {
