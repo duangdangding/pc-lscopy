@@ -1021,3 +1021,58 @@ input[type="radio"] {
   user-select: text;
   word-break: break-all;
 }
+
+/* 发送成功提示 toast（倒计时自动关闭） */
+.tf-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--bg-item);
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  padding: 10px 14px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+  z-index: 999;
+  max-width: 88%;
+  animation: tf-toast-in 0.2s ease;
+}
+
+@keyframes tf-toast-in {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+.tf-toast-text {
+  font-size: 13px;
+  white-space: pre-line;
+}
+
+.tf-toast-countdown {
+  color: var(--text-dim);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.tf-toast-close {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+
+.tf-toast-close:hover {
+  color: var(--text);
+}

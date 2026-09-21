@@ -113,8 +113,12 @@ cargo clippy           # lint
   - 发送：在线设备直接选（`transfer_send`）或手动 IP（`transfer_send_ip`，探测配置端口 +
     8765 的 `/info`）；已配对设备用对方配对码做 XOR 流加密（X-Enc-Nonce 头），未配对明文；
     旧版应用/安卓端无 `/recv`，发送方按 404 提示「对方版本过旧」。
-  - 传输记录存 SQLite `transfers` 表（保留最近 200 条），前端靠 `transfer-progress` /
+  - 传输记录只记**接收成功**的条目（SQLite `transfers` 表，保留最近 200 条；发送结果走
+    弹窗/toast 不入库，查询按 `direction='recv' AND ok=1` 过滤）；前端靠 `transfer-progress` /
     `transfer-changed` 事件刷新；设备列表只显示在线设备，窗口内每 3s 轮询 + 每 10s 深度扫描。
+    单条删除（`transfer_delete`）与清空（`transfer_clear_history`）都会三选一询问是否连同
+    文件删除——只删接收保存的文件，**绝不碰发送源文件**（`remove_recv_file` 按 direction 拦截）。
+  - 发送成功的结果提示是底部 toast（默认 30s 倒计时自动关闭），有失败时仍用 alert 手动关闭。
   - 密钥流 8 字节块全局对齐（`xor_crypt_at` 带 chunk_base），收发两端块大小都必须是 8 的倍数。
 - **批量删除三选一**：范围内有置顶记录时用 `choiceDialog` 提供「取消 / 只删非置顶 / 连同置顶删除」，
   不要退回二选一弹窗（取消语义会被占用）。

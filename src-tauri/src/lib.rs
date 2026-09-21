@@ -2266,6 +2266,7 @@ pub fn run() {
             lan::transfer::transfer_send_ip,
             lan::transfer::transfer_respond_recv,
             lan::transfer::transfer_history,
+            lan::transfer::transfer_delete,
             lan::transfer::transfer_clear_history,
             lan::transfer::transfer_reveal
         ])

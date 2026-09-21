@@ -263,10 +263,10 @@ pub fn handle_recv(
 
     // 默认手动确认：弹窗等待用户答复（开启「自动接收」则跳过）
     if !auto_accept {
-        let (accepted, err_code, err_msg) = match ask_recv_approval(app, &peer, &name, total, client_ip) {
-            Some(true) => (true, 0, ""),
-            Some(false) => (false, 403, "已拒绝接收"),
-            None => (false, 409, "确认超时，已自动拒绝"),
+        let (accepted, err_code) = match ask_recv_approval(app, &peer, &name, total, client_ip) {
+            Some(true) => (true, 0),
+            Some(false) => (false, 403),
+            None => (false, 409),
         };
         if !accepted {
             let body = match err_code {
@@ -276,9 +276,7 @@ pub fn handle_recv(
             respond_json(stream, err_code, &body);
             // 排空请求体，让发送方完整发出后读到上面的错误响应
             drain_body(stream, body_start.len(), total);
-            let state = app.state::<AppState>();
-            record_transfer(&state, "recv", &peer, &name, None, total, false, Some(err_msg));
-            let _ = app.emit("transfer-changed", ());
+            // 拒绝/超时不入传输记录（记录只保留接收成功的条目）
             return;
         }
     }
@@ -344,9 +342,7 @@ pub fn handle_recv(
         }
         Err(e) => {
             let _ = std::fs::remove_file(&dest);
-            let state = app.state::<AppState>();
-            record_transfer(&state, "recv", &peer, &saved_name, None, 0, false, Some(&e));
-            let _ = app.emit("transfer-changed", ());
+            // 接收失败不入传输记录（记录只保留接收成功的条目）
             let body = format!(r#"{{"error":"{e}"}}"#);
             respond_json(stream, 500, &body);
         }
@@ -648,7 +644,8 @@ fn send_one(
     }
 }
 
-/// 向目标发送一批文件（逐个推送，单个失败不中断后续），返回汇总消息
+/// 向目标发送一批文件（逐个推送，单个失败不中断后续），返回汇总消息。
+/// 发送不写传输记录：记录只保留「接收成功」的条目（发送结果通过弹窗/进度反馈）
 fn send_paths_to(app: &AppHandle, target: &SendTarget, paths: Vec<String>) -> String {
     let count = paths.len();
     let mut ok_count = 0usize;
@@ -659,27 +656,14 @@ fn send_paths_to(app: &AppHandle, target: &SendTarget, paths: Vec<String>) -> St
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| p.clone());
-        let state = app.state::<AppState>();
         if path.is_dir() {
-            let msg = "暂不支持发送文件夹";
-            record_transfer(&state, "send", &target.name, &name, Some(p), 0, false, Some(msg));
-            failures.push(format!("{name}：{msg}"));
-            let _ = app.emit("transfer-changed", ());
+            failures.push(format!("{name}：暂不支持发送文件夹"));
             continue;
         }
-        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         match send_one(app, target, &path, &name, i + 1, count) {
-            Ok(_) => {
-                ok_count += 1;
-                record_transfer(&state, "send", &target.name, &name, Some(p), size, true, None);
-            }
-            Err(e) => {
-                let msg = e.to_string();
-                record_transfer(&state, "send", &target.name, &name, Some(p), size, false, Some(&msg));
-                failures.push(format!("{name}：{msg}"));
-            }
+            Ok(_) => ok_count += 1,
+            Err(e) => failures.push(format!("{name}：{e}")),
         }
-        let _ = app.emit("transfer-changed", ());
     }
     if failures.is_empty() {
         format!("已发送 {ok_count} 个文件到「{}」", target.name)
@@ -744,13 +728,13 @@ pub fn transfer_respond_recv(state: State<AppState>, request_id: String, accept:
     }
 }
 
-/// 传输记录（最近 100 条，新的在前）
+/// 传输记录（最近 100 条，新的在前；只保留接收成功的条目）
 #[tauri::command]
 pub fn transfer_history(state: State<AppState>) -> Vec<TransferDto> {
     let db = state.db.lock().unwrap();
     let mut stmt = match db.prepare(
         "SELECT id, direction, peer, file_name, path, size, ok, msg, created_at
-         FROM transfers ORDER BY id DESC LIMIT 100",
+         FROM transfers WHERE direction='recv' AND ok=1 ORDER BY id DESC LIMIT 100",
     ) {
         Ok(s) => s,
         Err(_) => return vec![],
@@ -774,10 +758,50 @@ pub fn transfer_history(state: State<AppState>) -> Vec<TransferDto> {
     }
 }
 
-/// 清空传输记录
+/// 只删除「接收保存」的文件：发送记录里的路径是用户源文件，绝不能碰
+fn remove_recv_file(direction: &str, path: Option<&str>) {
+    if direction != "recv" {
+        return;
+    }
+    if let Some(p) = path {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+/// 删除单条传输记录；delete_file 为 true 时连同已接收的文件一起删除
 #[tauri::command]
-pub fn transfer_clear_history(state: State<AppState>) -> Result<(), String> {
+pub fn transfer_delete(state: State<AppState>, id: i64, delete_file: bool) -> Result<(), String> {
     let db = state.db.lock().unwrap();
+    if delete_file {
+        if let Ok((direction, path)) = db.query_row(
+            "SELECT direction, path FROM transfers WHERE id=?1",
+            params![id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+        ) {
+            remove_recv_file(&direction, path.as_deref());
+        }
+    }
+    db.execute("DELETE FROM transfers WHERE id=?1", params![id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 清空传输记录；delete_file 为 true 时连同所有已接收的文件一起删除
+#[tauri::command]
+pub fn transfer_clear_history(state: State<AppState>, delete_file: bool) -> Result<(), String> {
+    let db = state.db.lock().unwrap();
+    if delete_file {
+        let rows: Vec<(String, Option<String>)> = db
+            .prepare("SELECT direction, path FROM transfers")
+            .and_then(|mut s| {
+                let mapped = s.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                Ok(mapped.filter_map(|r| r.ok()).collect())
+            })
+            .unwrap_or_default();
+        for (direction, path) in rows {
+            remove_recv_file(&direction, path.as_deref());
+        }
+    }
     db.execute("DELETE FROM transfers", [])
         .map_err(|e| e.to_string())?;
     Ok(())

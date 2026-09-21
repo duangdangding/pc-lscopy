@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open } from "@tauri-apps/plugin-dialog";
 import { applyAppearance, loadConfig } from "./config";
+import { choiceDialog } from "./confirm";
 
 const $ = <T extends HTMLElement>(sel: string) => document.querySelector<T>(sel)!;
 
@@ -163,7 +164,11 @@ async function sendPaths(paths: string[], target: { deviceId?: string; ip?: stri
     const msg = target.ip
       ? await invoke<string>("transfer_send_ip", { ip: target.ip, paths })
       : await invoke<string>("transfer_send", { deviceId: target.deviceId, paths });
-    alert(msg);
+    if (msg.startsWith("已发送")) {
+      showResultToast(msg); // 全部成功：30s 后自动关闭
+    } else {
+      alert(msg); // 有失败：保留手动关闭，避免错过错误信息
+    }
   } catch (e) {
     alert(`发送失败: ${e}`);
   } finally {
@@ -172,6 +177,42 @@ async function sendPaths(paths: string[], target: { deviceId?: string; ip?: stri
     showProgress(false);
     refreshHistory();
   }
+}
+
+// 发送成功提示：底部 toast，倒计时 30s 自动关闭（可点 × 立即关闭）
+let toastTimer: number | undefined;
+function showResultToast(message: string, seconds = 30) {
+  document.querySelector(".tf-toast")?.remove();
+  if (toastTimer !== undefined) window.clearInterval(toastTimer);
+  const toast = document.createElement("div");
+  toast.className = "tf-toast";
+  const text = document.createElement("span");
+  text.className = "tf-toast-text";
+  text.textContent = message;
+  const cd = document.createElement("span");
+  cd.className = "tf-toast-countdown";
+  const close = document.createElement("button");
+  close.className = "tf-toast-close";
+  close.textContent = "×";
+  close.title = "关闭";
+  let left = seconds;
+  cd.textContent = `${left}s`;
+  const dismiss = () => {
+    if (toastTimer !== undefined) window.clearInterval(toastTimer);
+    toastTimer = undefined;
+    toast.remove();
+  };
+  close.onclick = dismiss;
+  toastTimer = window.setInterval(() => {
+    left -= 1;
+    if (left <= 0) {
+      dismiss();
+    } else {
+      cd.textContent = `${left}s`;
+    }
+  }, 1000);
+  toast.append(text, cd, close);
+  document.body.appendChild(toast);
 }
 
 async function pickAndSend(target: { deviceId?: string; ip?: string }) {
@@ -198,7 +239,7 @@ function renderHistory(items: TransferDto[]) {
   if (!items.length) {
     const p = document.createElement("p");
     p.className = "desc";
-    p.textContent = "暂无记录";
+    p.textContent = "暂无记录（只保留接收成功的文件）";
     listEl.appendChild(p);
     return;
   }
@@ -206,47 +247,53 @@ function renderHistory(items: TransferDto[]) {
     const row = document.createElement("div");
     row.className = "lan-device";
 
+    // 记录只保留接收成功的条目，箭头固定为「接收」
     const arrow = document.createElement("span");
-    arrow.className = "tf-arrow " + (t.direction === "send" ? "send" : "recv");
-    arrow.textContent = t.direction === "send" ? "⬆" : "⬇";
-    arrow.title = t.direction === "send" ? "已发送" : "已接收";
+    arrow.className = "tf-arrow recv";
+    arrow.textContent = "⬇";
+    arrow.title = "已接收";
 
     const meta = document.createElement("div");
     meta.className = "lan-meta";
     const title = document.createElement("div");
     title.className = "lan-title";
     title.textContent = t.file_name;
-    if (!t.ok) {
-      const badge = document.createElement("span");
-      badge.className = "lan-badge off";
-      badge.textContent = "失败";
-      title.appendChild(badge);
-    }
     const sub = document.createElement("div");
     sub.className = "lan-sub";
-    sub.textContent =
-      `${t.direction === "send" ? "发给" : "来自"} ${t.peer} · ${fmtSize(t.size)} · ${fmtTime(t.created_at)}` +
-      (t.ok ? "" : ` · ${t.msg || "未知错误"}`);
+    sub.textContent = `来自 ${t.peer} · ${fmtSize(t.size)} · ${fmtTime(t.created_at)}`;
     meta.append(title, sub);
 
-    row.append(arrow, meta);
-    // 成功记录可定位到文件（发送的为源文件，接收的为保存位置）
-    if (t.ok && t.path) {
-      const actions = document.createElement("div");
-      actions.className = "lan-actions";
-      const btn = document.createElement("button");
-      btn.className = "btn small";
-      btn.textContent = "打开位置";
-      btn.onclick = async () => {
+    const actions = document.createElement("div");
+    actions.className = "lan-actions";
+    if (t.path) {
+      const openBtn = document.createElement("button");
+      openBtn.className = "btn small";
+      openBtn.textContent = "打开位置";
+      openBtn.onclick = async () => {
         try {
           await invoke("transfer_reveal", { path: t.path });
         } catch (e) {
           alert(String(e));
         }
       };
-      actions.appendChild(btn);
-      row.appendChild(actions);
+      actions.appendChild(openBtn);
     }
+    const delBtn = document.createElement("button");
+    delBtn.className = "btn small danger";
+    delBtn.textContent = "删除";
+    delBtn.onclick = async () => {
+      const c = await choiceDialog(`删除记录「${t.file_name}」？`, [
+        { value: "cancel", text: "取消" },
+        { value: "record", text: "仅删除记录" },
+        { value: "file", text: "连同文件一起删除", kind: "danger" },
+      ]);
+      if (!c || c === "cancel") return;
+      await invoke("transfer_delete", { id: t.id, deleteFile: c === "file" });
+      refreshHistory();
+    };
+    actions.appendChild(delBtn);
+
+    row.append(arrow, meta, actions);
     listEl.appendChild(row);
   }
 }
@@ -379,7 +426,15 @@ $("#tf-auto-accept").addEventListener("change", async (e) => {
 });
 
 $("#tf-clear").addEventListener("click", async () => {
-  await invoke("transfer_clear_history");
+  const items = await invoke<TransferDto[]>("transfer_history");
+  if (!items.length) return;
+  const c = await choiceDialog(`清空全部 ${items.length} 条传输记录？`, [
+    { value: "cancel", text: "取消" },
+    { value: "record", text: "仅删除记录" },
+    { value: "file", text: "连同文件一起删除", kind: "danger" },
+  ]);
+  if (!c || c === "cancel") return;
+  await invoke("transfer_clear_history", { deleteFile: c === "file" });
   refreshHistory();
 });
 
