@@ -127,5 +127,19 @@ cargo clippy           # lint
   （`%APPDATA%`）的配置会在首次启动时自动迁移。落盘统一走 `persist_config`（锁顺序固定 config → lan.settings → config_file）。
 - 主窗口失焦自动隐藏是**延迟 150ms 复查**实现的（拖动/缩放会造成瞬时失焦）；改动窗口事件逻辑时注意 `dragging` / `panel_pinned` / `main_focused` 三个状态。
 - 版本号需同步修改 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 三处（`Cargo.lock` 随构建自动更新）。
-- 发布流程：推 `v*` tag 触发 `.github/workflows/release.yml`，Windows + macOS 构建并生成 draft release。
+- **发布流程**（新会话发布按此完整执行）：
+  1. 验证：`bun run build` + `cargo check` / `cargo clippy` 全绿；版本号三处已同步。
+  2. 提交并推送：`git add -A && git commit` → `git push origin main` → `git tag vX.Y.Z && git push origin vX.Y.Z`。
+     推 `v*` tag 触发 `.github/workflows/release.yml`，Windows + macOS 并行构建（约 10–20 分钟）。
+  3. **GitHub API 凭据**：本机无 `gh` CLI，token 在 Windows 凭据管理器（git credential manager）里，
+     用 `printf "protocol=https\nhost=github.com\n\n" | git credential fill` 取 `password=` 行即为
+     token（用户 duangdangding，scope 含 repo/workflow）。**任何时候不得明文打印 token**：
+     输出前先 `sed 's/password=.*/password=**FOUND**/'`；传给 Python 用环境变量
+     （`export GH_TOKEN=$(...)`，Windows 上 Python 的 `os.popen` 走 cmd.exe，git-bash 管道不可用）。
+  4. 监控构建（仓库公开，可匿名）：`GET /repos/duangdangding/pc-lscopy/actions/runs?per_page=2`，
+     等 `status=completed, conclusion=success`。
+  5. 写 release notes：先在工作区写 `release-notes-X.Y.Z.md`（新功能 / 升级提醒 / 其他），
+     `GET /releases/tags/vX.Y.Z` 拿 release id → `PATCH /releases/{id}` 写入 `body`；
+     若 `draft: true` 再 PATCH `{"draft": false}` 发布（当前 workflow 产出即非 draft，写 body 即生效）。
+     核对：重新 GET，确认 body 首尾完整、assets 数量正确（通常 7 个：setup/msi/portable + 双 dmg + 双 app.tar.gz）。
 - `dist/`、`target/`、`node_modules/` 为构建产物，不要提交或编辑。
