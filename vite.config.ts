@@ -36,6 +36,7 @@ export default defineConfig(async () => ({
         main: r("./index.html"),
         settings: r("./settings.html"),
         blocked: r("./blocked.html"),
+        transfer: r("./transfer.html"),
       },
     },
   },

@@ -27,6 +27,9 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::{encode_png, hash_bytes, now_secs, AppState};
 
+/// 局域网互传文件（发送 / 接收 / 传输记录），复用本模块的配对鉴权与加密
+pub mod transfer;
+
 // ---------- 常量 ----------
 
 pub const DEFAULT_PORT: u16 = 8765;
@@ -123,6 +126,8 @@ pub struct LanSettings {
     pub sync_image: bool,
     pub sync_media: bool,
     pub sync_other: bool,
+    /// 互传文件：自动接收（false = 每次收到文件都需手动确认）
+    pub transfer_auto_accept: bool,
 }
 
 impl Default for LanSettings {
@@ -148,6 +153,7 @@ impl Default for LanSettings {
             sync_image: true,
             sync_media: true,
             sync_other: true,
+            transfer_auto_accept: false,
         }
     }
 }
@@ -166,6 +172,8 @@ pub struct LanShared {
     pub discovered: Mutex<HashMap<String, Discovered>>,
     /// 等待用户确认的配对请求：deviceId → 答复通道
     pub pending_pairs: Mutex<HashMap<String, mpsc::Sender<bool>>>,
+    /// 等待用户确认的文件接收请求：requestId → 答复通道
+    pub pending_recvs: Mutex<HashMap<String, mpsc::Sender<bool>>>,
     pub server_running: AtomicBool,
     /// 实际监听端口（配置端口被占用时由系统分配）
     pub actual_port: AtomicU64,
@@ -181,6 +189,7 @@ impl LanShared {
             settings: Mutex::new(settings),
             discovered: Mutex::new(HashMap::new()),
             pending_pairs: Mutex::new(HashMap::new()),
+            pending_recvs: Mutex::new(HashMap::new()),
             server_running: AtomicBool::new(false),
             actual_port: AtomicU64::new(0),
             syncing: Mutex::new(HashSet::new()),
@@ -412,18 +421,28 @@ fn respond_json(stream: &mut TcpStream, code: u16, body: &str) {
 // 轻量流加密：密钥流 = SipHash(配对码, nonce, 块序号) 与明文 XOR（加解密同一函数）。
 // 为不引入新依赖的自研轻量方案，用于局域网内防明文嗅探，非密码学强度。
 
-/// 密钥 = 请求方持有的本机配对码（X-Token），双方配对后均持有
-fn xor_crypt(key: &str, nonce: u64, data: &mut [u8]) {
+/// 密钥流块：SipHash(配对码, nonce, 块序号)
+fn keystream_block(key: &str, nonce: u64, idx: usize) -> [u8; 8] {
+    let mut h = DefaultHasher::new();
+    key.hash(&mut h);
+    nonce.hash(&mut h);
+    idx.hash(&mut h);
+    h.finish().to_le_bytes()
+}
+
+/// chunk_base = data 起始处的全局 8 字节块序号（流式加解密的偏移，块内从 0 计）
+fn xor_crypt_at(key: &str, nonce: u64, chunk_base: usize, data: &mut [u8]) {
     for (i, chunk) in data.chunks_mut(8).enumerate() {
-        let mut h = DefaultHasher::new();
-        key.hash(&mut h);
-        nonce.hash(&mut h);
-        i.hash(&mut h);
-        let ks = h.finish().to_le_bytes();
+        let ks = keystream_block(key, nonce, chunk_base + i);
         for (b, k) in chunk.iter_mut().zip(ks.iter()) {
             *b ^= k;
         }
     }
+}
+
+/// 密钥 = 请求方持有的本机配对码（X-Token），双方配对后均持有
+fn xor_crypt(key: &str, nonce: u64, data: &mut [u8]) {
+    xor_crypt_at(key, nonce, 0, data)
 }
 
 /// 由时间 + 自增计数器生成随机 nonce（无需 rand 依赖）
@@ -473,8 +492,12 @@ fn decrypt_if_needed(resp: &mut HttpResp, token: Option<&str>) {
     }
 }
 
-/// 读取 HTTP 请求行 + 头部（只支持 GET，无 body）。返回 (path, query, headers)
-fn read_request(stream: &mut TcpStream) -> Option<(String, String, HashMap<String, String>)> {
+/// 解析后的 HTTP 请求：(path, method, query, headers, body_start)
+/// body_start 为读头时连带读到的请求体起始字节（POST 接口用，GET 时为空）
+type RawRequest = (String, String, String, HashMap<String, String>, Vec<u8>);
+
+/// 读取 HTTP 请求行 + 头部。
+fn read_request(stream: &mut TcpStream) -> Option<RawRequest> {
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .ok()?;
@@ -495,12 +518,19 @@ fn read_request(stream: &mut TcpStream) -> Option<(String, String, HashMap<Strin
         buf.extend_from_slice(&tmp[..n]);
     };
     let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+    let body_start = buf[head_end + 4..].to_vec();
     let mut lines = head.split("\r\n");
     let request_line = lines.next()?;
     let mut parts = request_line.split_whitespace();
-    let method = parts.next()?;
-    if method != "GET" {
-        return Some(("__method_not_allowed__".into(), String::new(), HashMap::new()));
+    let method = parts.next()?.to_string();
+    if method != "GET" && method != "POST" {
+        return Some((
+            "__method_not_allowed__".into(),
+            String::new(),
+            String::new(),
+            HashMap::new(),
+            Vec::new(),
+        ));
     }
     let target = parts.next()?;
     let path = target.split('?').next().unwrap_or("").to_string();
@@ -514,7 +544,7 @@ fn read_request(stream: &mut TcpStream) -> Option<(String, String, HashMap<Strin
             );
         }
     }
-    Some((path, query, headers))
+    Some((path, method, query, headers, body_start))
 }
 
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -595,7 +625,7 @@ fn handle_conn(app: AppHandle, mut stream: TcpStream) {
         .peer_addr()
         .map(|a| a.ip().to_string())
         .unwrap_or_default();
-    let Some((path, query, headers)) = read_request(&mut stream) else {
+    let Some((path, method, query, headers, body_start)) = read_request(&mut stream) else {
         return;
     };
     if path == "__method_not_allowed__" {
@@ -603,14 +633,17 @@ fn handle_conn(app: AppHandle, mut stream: TcpStream) {
         return;
     }
     let query = parse_query(&query);
-    match path.as_str() {
-        "/info" => handle_info(&app, &mut stream, &headers),
-        "/pair" => handle_pair(&app, &mut stream, &headers, &client_ip),
-        "/unpair" => handle_unpair(&app, &mut stream, &headers),
-        "/unblocked" => handle_unblocked(&app, &mut stream, &headers),
-        "/blocked" => handle_blocked_notice(&app, &mut stream, &headers, &client_ip),
-        "/clips" => handle_clips(&app, &mut stream, &headers, &query, &client_ip),
-        "/file" => handle_file(&app, &mut stream, &headers, &query, &client_ip),
+    match (method.as_str(), path.as_str()) {
+        ("GET", "/info") => handle_info(&app, &mut stream, &headers),
+        ("GET", "/pair") => handle_pair(&app, &mut stream, &headers, &client_ip),
+        ("GET", "/unpair") => handle_unpair(&app, &mut stream, &headers),
+        ("GET", "/unblocked") => handle_unblocked(&app, &mut stream, &headers),
+        ("GET", "/blocked") => handle_blocked_notice(&app, &mut stream, &headers, &client_ip),
+        ("GET", "/clips") => handle_clips(&app, &mut stream, &headers, &query, &client_ip),
+        ("GET", "/file") => handle_file(&app, &mut stream, &headers, &query, &client_ip),
+        ("POST", "/recv") => {
+            transfer::handle_recv(&app, &mut stream, &headers, &query, &client_ip, body_start)
+        }
         _ => respond_json(&mut stream, 404, "Not Found"),
     }
 }
@@ -2154,6 +2187,8 @@ pub struct LanStateDto {
     sync_image: bool,
     sync_media: bool,
     sync_other: bool,
+    /// 互传文件：自动接收（false = 每次收到文件需手动确认）
+    transfer_auto_accept: bool,
     devices: Vec<DeviceDto>,
     blocked: Vec<BlockedDto>,
 }
@@ -2205,6 +2240,7 @@ fn build_state_dto(state: &AppState) -> LanStateDto {
         sync_image: s.sync_image,
         sync_media: s.sync_media,
         sync_other: s.sync_other,
+        transfer_auto_accept: s.transfer_auto_accept,
         devices,
         blocked,
     }
@@ -2234,6 +2270,7 @@ pub struct LanSettingsPatch {
     sync_image: Option<bool>,
     sync_media: Option<bool>,
     sync_other: Option<bool>,
+    transfer_auto_accept: Option<bool>,
 }
 
 #[tauri::command]
@@ -2293,6 +2330,9 @@ pub fn lan_update_settings(
         }
         if let Some(v) = patch.sync_other {
             s.sync_other = v;
+        }
+        if let Some(v) = patch.transfer_auto_accept {
+            s.transfer_auto_accept = v;
         }
     }
     save_settings(&state);

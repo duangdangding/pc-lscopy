@@ -333,6 +333,10 @@ $("#lan-open-blocked").addEventListener("click", () => {
   invoke("open_blocked").catch(() => {});
 });
 
+$("#lan-open-transfer").addEventListener("click", () => {
+  invoke("open_transfer").catch(() => {});
+});
+
 $("#lan-refresh").addEventListener("click", async () => {
   const btn = $<HTMLButtonElement>("#lan-refresh");
   if (btn.disabled) return;

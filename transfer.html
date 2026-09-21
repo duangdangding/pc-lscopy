@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>互传文件 - 共享剪贴板-卢</title>
+    <script type="module" src="/src/transfer.ts" defer></script>
+  </head>
+
+  <body class="settings-body">
+    <div class="settings-page">
+      <h1>互传文件</h1>
+
+      <section class="card">
+        <h2>发送到设备
+          <button id="tf-refresh" class="btn small">刷新</button>
+          <button id="tf-open-settings" class="btn small">同步设置</button>
+        </h2>
+        <div id="tf-devices" class="lan-list"><p class="desc">扫描中…</p></div>
+        <div class="row" style="margin-top: 10px">
+          <input id="tf-manual-ip" type="text" placeholder="或输入对方 IP，如 192.168.1.8" />
+          <button id="tf-send-ip" class="btn small">选文件发给此 IP</button>
+        </div>
+        <div id="tf-drop" class="tf-drop">
+          <p class="tf-drop-text">拖拽文件到此处发送</p>
+          <button id="tf-pick" class="btn small primary">选择文件发送</button>
+        </div>
+        <div id="tf-progress" class="tf-progress" hidden>
+          <div class="tf-progress-bar"><div id="tf-progress-fill" class="tf-progress-fill"></div></div>
+          <p class="desc" id="tf-progress-text"></p>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>接收</h2>
+        <label class="check"><input id="tf-auto-accept" type="checkbox" /> 自动接收文件（关闭时每次收到文件都需要手动确认）</label>
+        <p class="desc">同一局域网的设备都可以向本机发送文件（需开启「可被发现」或「共享剪贴板」以启动本机服务）。收到的文件保存到：</p>
+        <p class="desc tf-dir"><code id="tf-dir">…</code></p>
+        <p class="desc">与局域网同步的「文件存储路径」一致，可在 设置 → 局域网同步 → 同步选项 中修改；未设置时使用系统下载目录。</p>
+      </section>
+
+      <section class="card">
+        <h2>传输记录 <button id="tf-clear" class="btn small">清空</button></h2>
+        <div id="tf-history" class="lan-list"><p class="desc">暂无记录</p></div>
+      </section>
+    </div>
+  </body>
+</html>

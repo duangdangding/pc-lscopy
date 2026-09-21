@@ -340,7 +340,18 @@ fn init_db(path: &PathBuf) -> Result<Connection, String> {
             hash INTEGER,
             created_at INTEGER NOT NULL
         );
-        CREATE INDEX IF NOT EXISTS idx_clips_time ON clips(created_at DESC);",
+        CREATE INDEX IF NOT EXISTS idx_clips_time ON clips(created_at DESC);
+        CREATE TABLE IF NOT EXISTS transfers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            direction TEXT NOT NULL,
+            peer TEXT NOT NULL,
+            file_name TEXT NOT NULL,
+            path TEXT,
+            size INTEGER NOT NULL DEFAULT 0,
+            ok INTEGER NOT NULL DEFAULT 0,
+            msg TEXT,
+            created_at INTEGER NOT NULL
+        );",
     )
     .map_err(|e| e.to_string())?;
     // 旧版本库迁移：补 pinned 列
@@ -1800,6 +1811,15 @@ fn open_blocked(app: AppHandle) {
     }
 }
 
+// 打开互传文件窗口
+#[tauri::command]
+fn open_transfer(app: AppHandle) {
+    if let Some(w) = app.get_webview_window("transfer") {
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+}
+
 // 本地 UTC 偏移（秒），用于"今天"的零点计算
 fn local_utc_offset(_now: i64) -> i64 {
     #[cfg(target_family = "windows")]
@@ -1953,7 +1973,7 @@ fn hide_panel_and_yield_focus(app: &AppHandle) {
     }
     #[cfg(target_os = "macos")]
     {
-        let others_visible = ["settings", "blocked"].iter().any(|l| {
+        let others_visible = ["settings", "blocked", "transfer"].iter().any(|l| {
             app.get_webview_window(l)
                 .map(|w| w.is_visible().unwrap_or(false))
                 .unwrap_or(false)
@@ -2060,9 +2080,10 @@ pub fn run() {
             // 托盘
             let show = MenuItem::with_id(app, "show", "显示面板", true, None::<&str>)?;
             let toggle = CheckMenuItem::with_id(app, "toggle", "开启剪贴板记录", true, config.enabled, None::<&str>)?;
+            let transfer = MenuItem::with_id(app, "transfer", "互传文件", true, None::<&str>)?;
             let settings = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &toggle, &settings, &quit])?;
+            let menu = Menu::with_items(app, &[&show, &toggle, &transfer, &settings, &quit])?;
             TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
@@ -2075,6 +2096,12 @@ pub fn run() {
                     }
                     "settings" => {
                         if let Some(w) = app.get_webview_window("settings") {
+                            let _ = w.show();
+                            let _ = w.set_focus();
+                        }
+                    }
+                    "transfer" => {
+                        if let Some(w) = app.get_webview_window("transfer") {
                             let _ = w.show();
                             let _ = w.set_focus();
                         }
@@ -2181,6 +2208,17 @@ pub fn run() {
                 });
             }
 
+            // 互传文件窗口：关闭改隐藏
+            if let Some(win) = app.get_webview_window("transfer") {
+                let w = win.clone();
+                win.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = w.hide();
+                    }
+                });
+            }
+
             // 启动剪贴板监听线程
             start_watcher(app.handle().clone());
             // 启动局域网同步模块（beacon 收发 + 自动同步，按开关启停 HTTP 服务）
@@ -2203,6 +2241,7 @@ pub fn run() {
             import_clips,
             open_settings,
             open_blocked,
+            open_transfer,
             list_system_fonts,
             open_clip_with_system,
             count_pinned_between,
@@ -2222,7 +2261,13 @@ pub fn run() {
             lan::lan_sync_now,
             lan::lan_block,
             lan::lan_unblock,
-            lan::lan_respond_pair
+            lan::lan_respond_pair,
+            lan::transfer::transfer_send,
+            lan::transfer::transfer_send_ip,
+            lan::transfer::transfer_respond_recv,
+            lan::transfer::transfer_history,
+            lan::transfer::transfer_clear_history,
+            lan::transfer::transfer_reveal
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

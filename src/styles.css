@@ -929,3 +929,95 @@ input[type="radio"] {
   outline: none;
   border-color: var(--accent);
 }
+
+/* ---------- 互传文件窗口 ---------- */
+
+/* 可点击选择的设备行 */
+.tf-device {
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+
+.tf-device:hover {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+}
+
+.tf-device.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.tf-device.selected .lan-title::after {
+  content: " ✓";
+  color: var(--accent);
+}
+
+/* 拖拽发送区 */
+.tf-drop {
+  margin-top: 12px;
+  border: 1.5px dashed var(--border);
+  border-radius: 10px;
+  padding: 18px 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.tf-drop.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.tf-drop-text {
+  color: var(--text-dim);
+  font-size: 13px;
+  margin: 0;
+}
+
+/* 传输进度条 */
+.tf-progress {
+  margin-top: 12px;
+}
+
+.tf-progress-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--text-dim) 20%, transparent);
+  overflow: hidden;
+}
+
+.tf-progress-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width 0.15s ease;
+}
+
+.tf-progress .desc {
+  margin: 6px 0 0;
+}
+
+/* 历史记录的方向箭头 */
+.tf-arrow {
+  flex-shrink: 0;
+  font-size: 14px;
+  width: 20px;
+  text-align: center;
+}
+
+.tf-arrow.send {
+  color: var(--accent);
+}
+
+.tf-arrow.recv {
+  color: #3fb950;
+}
+
+/* 接收目录展示 */
+.tf-dir code {
+  user-select: text;
+  word-break: break-all;
+}

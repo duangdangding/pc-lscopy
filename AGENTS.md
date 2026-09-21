@@ -12,6 +12,8 @@
 - 面板无边框：工具栏/底栏空白处可拖动，右缘/下缘/右下角可调大小
 - 📌 钉住桌面：失焦/粘贴不自动隐藏，可连续粘贴多条
 - 局域网多设备同步：与安卓端 ClipDitto 及其他电脑互相同步剪贴板（设置页「局域网同步」标签）
+- 局域网互传文件：独立窗口（托盘菜单「互传文件」/ 同步页设备卡按钮进入），免配对直发，
+  支持手动输入 IP；接收默认需手动确认，可开「自动接收」；保存路径沿用同步的「文件存储路径」
 - 可选「记住窗口大小」：重启后恢复上次调整的长宽
 - 系统托盘、开机自启、单实例、静默启动
 
@@ -30,24 +32,29 @@
 index.html          主窗口页面（剪贴板历史面板，无边框/置顶/默认隐藏）
 settings.html       设置窗口页面
 blocked.html        黑名单管理窗口页面（局域网同步拉黑设备的独立管理页）
+transfer.html       互传文件窗口页面（设备选择/IP 直发/接收确认/传输记录）
 src/
   main.ts           主窗口前端逻辑（列表渲染、类型标签页、粘贴交互）
   settings.ts       设置页逻辑（热键、自启、数据库目录、局域网同步等）
   blocked.ts        黑名单窗口逻辑（列表 + 移出黑名单）
+  transfer.ts       互传文件窗口逻辑（实时扫描、发送、接收确认队列、传输记录）
   config.ts         前端共享配置
   confirm.ts        确认对话框组件（confirmDialog 二选一 / choiceDialog 多选一）
   styles.css        全局样式
 src-tauri/
-  src/lib.rs        后端主体（约 1900 行）：剪贴板监听、SQLite 存取、
+  src/lib.rs        后端主体（约 2300 行）：剪贴板监听、SQLite 存取、
                     托盘菜单、全局热键、窗口控制、模拟粘贴
-  src/lan.rs        局域网多设备同步（约 2200 行）：HTTP 服务（8765）、
+  src/lan.rs        局域网多设备同步（约 2700 行）：HTTP 服务（8765）、
                     UDP beacon 发现（8766 / 组播 239.255.60.60:8767）、
                     配对码鉴权（支持对方开「自动同意」时免码配对）、
                     增量同步客户端、黑名单
+  src/lan/transfer.rs  局域网互传文件：POST /recv 接收端（流式落盘、手动/
+                    自动确认）、发送端（免配对、IP 直发、配对时加密）、
+                    transfers 表传输记录
   src/main.rs       入口（仅调用 lib）
   capabilities/     Tauri 权限声明（windows 列表需包含新增窗口 label）
-  tauri.conf.json   窗口/打包配置（identifier: com.administrator.lscopy）
-vite.config.ts      多页面构建配置（index + settings + blocked）
+  tauri.conf.json   窗口/打包配置（identifier: com.lsh.lscopy）
+vite.config.ts      多页面构建配置（index + settings + blocked + transfer）
 .github/workflows/  CI / 发布流程
 ```
 
@@ -96,6 +103,19 @@ cargo clippy           # lint
     成功响应附带本机配对码（`{"result":"ok","token":…}`），请求方存下供后续 `/clips` 鉴权。
   - 同步页前端每 2s 轮询重建设备列表：配对表单展开期间（`pairingDeviceId` 非空）必须跳过
     列表重建，否则输入框会被刷掉；新增实时刷新类 UI 时注意同样的坑。
+- **互传文件**（`lan/transfer.rs`，与同步共用 HTTP 服务但**免配对**）：
+  - 端点 `POST /recv?name=&size=`：接收方校验黑名单后直接流式落盘（64KB 块，不入内存）；
+    保存目录沿用同步的 `download_dir`（空则回落系统下载目录），重名自动加 ` (n)`。
+  - 接收确认：`lan.transfer_auto_accept`（默认 false）关闭时弹窗等用户答复
+    （`pending_recvs` 通道 + `transfer-incoming` 事件，60s 超时自动拒绝），答复命令
+    `transfer_respond_recv`；收到请求时自动弹出 transfer 窗口（mac 还要 `app.show()`）。
+    拒绝/超时后排空请求体（上限 64MB）再断连，让发送方读到明确错误而非写失败。
+  - 发送：在线设备直接选（`transfer_send`）或手动 IP（`transfer_send_ip`，探测配置端口 +
+    8765 的 `/info`）；已配对设备用对方配对码做 XOR 流加密（X-Enc-Nonce 头），未配对明文；
+    旧版应用/安卓端无 `/recv`，发送方按 404 提示「对方版本过旧」。
+  - 传输记录存 SQLite `transfers` 表（保留最近 200 条），前端靠 `transfer-progress` /
+    `transfer-changed` 事件刷新；设备列表只显示在线设备，窗口内每 3s 轮询 + 每 10s 深度扫描。
+  - 密钥流 8 字节块全局对齐（`xor_crypt_at` 带 chunk_base），收发两端块大小都必须是 8 的倍数。
 - **批量删除三选一**：范围内有置顶记录时用 `choiceDialog` 提供「取消 / 只删非置顶 / 连同置顶删除」，
   不要退回二选一弹窗（取消语义会被占用）。
 - **构建必须走 Tauri CLI**（`bun run tauri build` / `tauri dev`），不要裸 `cargo build --release`：CLI 会开启 `custom-protocol` 特性并正确处理前端资源协议，裸 cargo 构建的 exe 会显示"无法访问页面"。
