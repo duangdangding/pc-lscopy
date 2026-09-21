@@ -1105,7 +1105,17 @@ pub enum LanErr {
 impl std::fmt::Display for LanErr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
-            LanErr::Net(e) => format!("连接失败: {e}"),
+            LanErr::Net(e) => {
+                // macOS Sequoia+ 的「本地网络」隐私拦截会伪装成路由错误 EHOSTUNREACH
+                // （os error 65），包根本没发出去；ad-hoc 签名的 App 更新后授权还会静默失效
+                if cfg!(target_os = "macos") && e.contains("os error 65") {
+                    format!(
+                        "连接失败: {e}。可能是 macOS 未授予「本地网络」权限：系统设置 → 隐私与安全性 → 本地网络 → 打开 lscopy 的开关（若已开启，请先关闭再打开；更新/重装后需重新授权，必要时重启 Mac）"
+                    )
+                } else {
+                    format!("连接失败: {e}")
+                }
+            }
             LanErr::Http(c) => format!("HTTP {c}"),
             LanErr::NeedPairing => "配对码错误".into(),
             LanErr::SharingOff => "对方未开启共享".into(),
