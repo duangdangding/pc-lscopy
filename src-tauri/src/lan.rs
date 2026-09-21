@@ -1456,37 +1456,30 @@ fn beacon_payload(app: &AppHandle) -> Option<Vec<u8>> {
     Some(body.to_string().into_bytes())
 }
 
-/// beacon 目标地址：255 全网广播 + 各网卡子网广播 + 组播组（每轮动态计算，网卡可能变化）
-fn beacon_targets() -> Vec<(String, u16)> {
-    let mut targets: Vec<(String, u16)> = vec![
-        ("255.255.255.255".to_string(), BEACON_PORT),
-        (MULTICAST_GROUP.to_string(), MULTICAST_PORT),
-    ];
-    for (_, bcast) in local_ipv4_addrs() {
-        if let Some(b) = bcast {
-            let t = (b.to_string(), BEACON_PORT);
-            if !targets.contains(&t) {
-                targets.push(t);
-            }
-        }
-    }
-    targets
-}
-
 /// beacon 发送线程：「可被发现」开启时每 3 秒广播一次本机信息（广播 + 组播双发）
 fn beacon_sender_loop(app: AppHandle) {
-    let socket = match UdpSocket::bind("0.0.0.0:0") {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("[lan] beacon 发送 socket 创建失败: {e}");
-            return;
-        }
-    };
-    let _ = socket.set_broadcast(true);
     loop {
         if let Some(payload) = beacon_payload(&app) {
-            for (addr, port) in beacon_targets() {
-                let _ = socket.send_to(&payload, (addr.as_str(), port));
+            let ifs = local_ipv4_addrs();
+            // 每张网卡单独绑定发送子网广播：保证 beacon 源 IP 与发送网卡一致。
+            // 多网卡机器（VMware/Hyper-V/Docker 虚拟网卡）若用单一 0.0.0.0 socket 发送，
+            // 内核可能拿虚拟网卡 IP 当源地址从物理网卡发出，接收方按源 IP 回连时
+            // 就会「No route to host (os error 65)」。
+            for (ip, bcast) in &ifs {
+                let Ok(s) = UdpSocket::bind((*ip, 0u16)) else {
+                    continue;
+                };
+                let _ = s.set_broadcast(true);
+                if let Some(b) = bcast {
+                    let _ = s.send_to(&payload, (b.to_string().as_str(), BEACON_PORT));
+                }
+            }
+            // 255 全网广播 + 组播：用默认 socket 发送，源地址由内核按出口网卡选择
+            // （网卡枚举失败时这仍是唯一的发现通道）
+            if let Ok(s) = UdpSocket::bind("0.0.0.0:0") {
+                let _ = s.set_broadcast(true);
+                let _ = s.send_to(&payload, ("255.255.255.255", BEACON_PORT));
+                let _ = s.send_to(&payload, (MULTICAST_GROUP, MULTICAST_PORT));
             }
         }
         std::thread::sleep(BEACON_INTERVAL);
