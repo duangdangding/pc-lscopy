@@ -1265,6 +1265,38 @@ fn simulate_paste_safe(app: &AppHandle) {
     }
 }
 
+// ---------- macOS 辅助功能权限 ----------
+
+/// 本进程是否已有「辅助功能」授权（AXIsProcessTrusted）
+#[cfg(target_os = "macos")]
+fn accessibility_trusted() -> bool {
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXIsProcessTrusted() -> bool;
+    }
+    unsafe { AXIsProcessTrusted() }
+}
+
+/// 检查辅助功能权限；未授权时弹窗引导并打开系统设置页，返回 false。
+/// 注意：mac 上覆盖安装/更新后旧授权可能失效，需在设置里移除 lscopy 再重新添加。
+#[cfg(target_os = "macos")]
+fn ensure_accessibility(app: &AppHandle) -> bool {
+    if accessibility_trusted() {
+        return true;
+    }
+    let _ = std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+        .spawn();
+    let app2 = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        app2.dialog()
+            .message("macOS 需要「辅助功能」权限才能模拟 ⌘V 粘贴。\n\n请在刚打开的系统设置中允许 lscopy。\n如果是更新/重装后失效：先在列表里移除 lscopy，再重新添加并打开开关。\n\n（剪贴板已更新，授权前可手动 ⌘V 粘贴）")
+            .title("需要辅助功能权限")
+            .blocking_show();
+    });
+    false
+}
+
 #[tauri::command]
 fn set_panel_pinned(state: State<AppState>, pinned: bool) {
     state.panel_pinned.store(pinned, Ordering::SeqCst);
@@ -1348,6 +1380,12 @@ fn paste_worker(app: AppHandle) {
         let hwnd = *state.prev_hwnd.lock().unwrap();
         if hwnd != 0 {
             focus_hwnd(hwnd);
+        }
+        // macOS：没有辅助功能权限时模拟按键会被系统静默丢弃（不崩溃、不报错），
+        // 提前检查并引导授权，避免「光标回来了但内容没粘贴」
+        #[cfg(target_os = "macos")]
+        if !ensure_accessibility(&app) {
+            continue; // 剪贴板已更新，用户可手动 ⌘V
         }
         // 等焦点 settling：Windows 50ms 在响应速度和可靠性之间比较平衡；
         // macOS 要等 NSApplication.hide 完成前台 App 切换，需要略久
