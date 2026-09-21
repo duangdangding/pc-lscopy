@@ -140,10 +140,11 @@ cargo clippy           # lint
      token（用户 duangdangding，scope 含 repo/workflow）。**任何时候不得明文打印 token**：
      输出前先 `sed 's/password=.*/password=**FOUND**/'`；传给 Python 用环境变量
      （`export GH_TOKEN=$(...)`，Windows 上 Python 的 `os.popen` 走 cmd.exe，git-bash 管道不可用）。
-  4. 监控构建（仓库公开，可匿名）：`GET /repos/duangdangding/pc-lscopy/actions/runs?per_page=2`，
-     等 `status=completed, conclusion=success`。
-  5. 写 release notes：先在工作区写 `release-notes-X.Y.Z.md`（新功能 / 升级提醒 / 其他），
-     `GET /releases/tags/vX.Y.Z` 拿 release id → `PATCH /releases/{id}` 写入 `body`；
-     若 `draft: true` 再 PATCH `{"draft": false}` 发布（当前 workflow 产出即非 draft，写 body 即生效）。
+  4. **构建结果由用户自行查看确认**（GitHub Actions 页面），助手不要自动轮询构建状态；
+     用户确认构建成功后才继续下一步。
+  5. 写 release notes（用户确认构建成功后执行）：先在工作区写 `release-notes-X.Y.Z.md`
+     （新功能 / 升级提醒 / 其他），`GET /releases/tags/vX.Y.Z` 拿 release id →
+     `PATCH /releases/{id}` 写入 `body`；若 `draft: true` 再 PATCH `{"draft": false}` 发布
+     （当前 workflow 产出即非 draft，写 body 即生效）。
      核对：重新 GET，确认 body 首尾完整、assets 数量正确（通常 7 个：setup/msi/portable + 双 dmg + 双 app.tar.gz）。
 - `dist/`、`target/`、`node_modules/` 为构建产物，不要提交或编辑。
