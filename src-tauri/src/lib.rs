@@ -1318,9 +1318,7 @@ fn paste_clip(state: State<AppState>, app: AppHandle, id: i64) -> Result<(), Str
     // 先立刻隐藏面板：点击的第一感知是面板消失，写剪贴板/模拟按键在后台完成
     // 钉住时不隐藏，方便连续粘贴多条
     if !state.panel_pinned.load(Ordering::SeqCst) {
-        if let Some(win) = app.get_webview_window("main") {
-            let _ = win.hide();
-        }
+        hide_panel_and_yield_focus(&app);
     }
     // 剪贴板内容立即更新
     set_clipboard_by_id_safe(&app, id)?;
@@ -1351,7 +1349,11 @@ fn paste_worker(app: AppHandle) {
         if hwnd != 0 {
             focus_hwnd(hwnd);
         }
-        // 等焦点 settling 即可，50ms 在响应速度和可靠性之间比较平衡
+        // 等焦点 settling：Windows 50ms 在响应速度和可靠性之间比较平衡；
+        // macOS 要等 NSApplication.hide 完成前台 App 切换，需要略久
+        #[cfg(target_os = "macos")]
+        std::thread::sleep(Duration::from_millis(120));
+        #[cfg(not(target_os = "macos"))]
         std::thread::sleep(Duration::from_millis(50));
         simulate_paste_safe(&app);
     }
@@ -1903,10 +1905,36 @@ fn apply_autostart(app: &AppHandle, enable: bool) {
 
 // ---------- 窗口/托盘 ----------
 
+// 隐藏主面板；macOS 上同时把焦点还给之前的 App：
+// mac 上单纯 win.hide() 不改变活跃 App（本进程仍是 frontmost，焦点回不到之前的文本框，
+// ⌘V 甚至会打进自己），NSApplication.hide() 才会让系统重新激活之前的前台应用。
+// 仅在设置/黑名单窗口都不可见时才隐藏整个 App，避免误伤其他窗口。
+fn hide_panel_and_yield_focus(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.hide();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let others_visible = ["settings", "blocked"].iter().any(|l| {
+            app.get_webview_window(l)
+                .map(|w| w.is_visible().unwrap_or(false))
+                .unwrap_or(false)
+        });
+        if !others_visible {
+            let _ = app.hide();
+        }
+    }
+}
+
+#[tauri::command]
+fn hide_panel(app: AppHandle) {
+    hide_panel_and_yield_focus(&app);
+}
+
 fn toggle_window(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
         if win.is_visible().unwrap_or(false) {
-            let _ = win.hide();
+            hide_panel_and_yield_focus(app);
         } else {
             // 记住弹出前的前台窗口，粘贴后把焦点还给它
             *app.state::<AppState>().prev_hwnd.lock().unwrap() = foreground_hwnd();
@@ -2051,7 +2079,7 @@ pub fn run() {
                 win.on_window_event(move |event| match event {
                     WindowEvent::CloseRequested { api, .. } => {
                         api.prevent_close();
-                        let _ = w.hide();
+                        hide_panel_and_yield_focus(w.app_handle());
                     }
                     WindowEvent::Resized(size) => {
                         // 记住窗口大小开启时：暂存新尺寸，由监听线程统一落盘
@@ -2081,7 +2109,7 @@ pub fn run() {
                             if st.main_focused.load(Ordering::SeqCst) {
                                 return;
                             }
-                            let _ = w2.hide();
+                            hide_panel_and_yield_focus(w2.app_handle());
                         });
                     }
                     _ => {}
@@ -2126,6 +2154,7 @@ pub fn run() {
             toggle_pin,
             copy_clip,
             paste_clip,
+            hide_panel,
             count_pinned_in_range,
             delete_range,
             delete_clip,

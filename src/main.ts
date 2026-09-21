@@ -309,7 +309,8 @@ document.addEventListener("keydown", async (e) => {
     }
   } else if (e.key === "Escape") {
     e.preventDefault();
-    await getCurrentWindow().hide();
+    // 走后端隐藏：mac 上需要顺带把焦点还给之前的 App（NSApplication.hide）
+    await invoke("hide_panel");
   }
 });
 
