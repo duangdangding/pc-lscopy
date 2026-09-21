@@ -84,6 +84,14 @@ export function choiceDialog(
 
     const btns = document.createElement("div");
     btns.className = "confirm-btns";
+    // 三个及以上选项时纵向整行排列：长文案按钮横排放不下 320px 弹窗，会溢出
+    const stacked = options.length >= 3;
+    if (stacked) btns.classList.add("stacked");
+    // 纵向排列时「取消」固定沉底（调用方统一把取消放第一位）
+    const ordered =
+      stacked && options[0]?.value === "cancel"
+        ? [...options.slice(1), options[0]]
+        : options;
 
     const done = (v: string | null) => {
       overlay.remove();
@@ -97,7 +105,7 @@ export function choiceDialog(
         done(null);
       }
     };
-    for (const opt of options) {
+    for (const opt of ordered) {
       const b = document.createElement("button");
       b.className = `btn ${opt.kind ?? ""}`.trim();
       b.textContent = opt.text;

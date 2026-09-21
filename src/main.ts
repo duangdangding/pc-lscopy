@@ -98,8 +98,8 @@ function fmtTime(ts: number): string {
 function updateHint() {
   const hk = formatHotkey(config?.hotkey || DEFAULT_HOTKEY);
   hintEl.textContent = panelPinned
-    ? `📌 已钉住 · Enter 粘贴不隐藏 · Esc 关闭 · ${hk} 呼出/隐藏`
-    : `↑↓ 选择 · Enter 粘贴 · Esc 关闭 · 右键仅复制 · ${hk} 呼出/隐藏`;
+    ? `📌 已钉住 · Enter 粘贴不隐藏 · Esc 清空/关闭 · ${hk} 呼出/隐藏`
+    : `↑↓ 选择 · Enter 粘贴 · Esc 清空/关闭 · 右键仅复制 · ${hk} 呼出/隐藏`;
 }
 
 // 空列表提示中的复制快捷键按平台显示（mac 为 ⌘C）
@@ -309,6 +309,13 @@ document.addEventListener("keydown", async (e) => {
     }
   } else if (e.key === "Escape") {
     e.preventDefault();
+    // 有搜索词时第一次 Esc 只清空搜索，再按才关闭面板
+    if (searchEl.value) {
+      searchEl.value = "";
+      keyword = "";
+      refresh();
+      return;
+    }
     // 走后端隐藏：mac 上需要顺带把焦点还给之前的 App（NSApplication.hide）
     await invoke("hide_panel");
   }
