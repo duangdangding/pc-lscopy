@@ -20,14 +20,26 @@ export interface AppConfig {
 }
 
 export async function loadConfig(): Promise<AppConfig> {
-  return await invoke<AppConfig>("get_config");
+  // 启动早期页面加载可能早于 Rust 端 .manage() 完成（Windows 上复现过
+  // get_config 报 "state not managed"），一旦失败整个初始化中断，
+  // 表现为字号/热键等不回填、字体下拉列表为空。这里短间隔重试等后端就绪。
+  let lastErr: unknown;
+  for (let i = 0; i < 20; i++) {
+    try {
+      return await invoke<AppConfig>("get_config");
+    } catch (e) {
+      lastErr = e;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
+  throw lastErr;
 }
 
 /** 是否 macOS（用于快捷键的显示与默认值） */
 export const isMac = /mac/i.test(navigator.platform || navigator.userAgent);
 
-/** 平台默认全局快捷键：mac 用 Cmd+Shift+V，Windows/Linux 用 Ctrl+` */
-export const DEFAULT_HOTKEY = isMac ? "Cmd+Shift+V" : "Ctrl+`";
+/** 默认全局快捷键：全平台统一 Ctrl+`（mac 上即 Control+`） */
+export const DEFAULT_HOTKEY = "Ctrl+`";
 
 /**
  * 把存储格式的快捷键（如 "Ctrl+Shift+V" / "Cmd+`"）转成当前平台的显示形式。

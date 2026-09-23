@@ -2636,6 +2636,22 @@ pub async fn lan_unpair(app: AppHandle, device_id: String) -> Result<(), String>
     .map_err(|e| e.to_string())
 }
 
+/// 手动删除设备记录：只清理本机的配对记录/发现缓存/同步游标，不通知对方。
+/// 用于对方换 IP、重装后残留在列表里的过期记录；对方在线时应改用「解除配对」。
+#[tauri::command]
+pub fn lan_forget_device(app: AppHandle, device_id: String) {
+    let state = app.state::<AppState>();
+    {
+        let mut s = state.lan.settings.lock().unwrap();
+        s.paired.remove(&device_id);
+        s.last_sync.remove(&device_id);
+    }
+    save_settings(&state);
+    state.lan.discovered.lock().unwrap().remove(&device_id);
+    state.lan.syncing.lock().unwrap().remove(&device_id);
+    emit_state_changed(&app);
+}
+
 /// 立即同步一台设备（mode 缺省为增量；可选 最近N条/指定某天/全部）
 #[tauri::command]
 pub async fn lan_sync_now(

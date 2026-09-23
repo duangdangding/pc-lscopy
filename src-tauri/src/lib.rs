@@ -49,13 +49,9 @@ pub struct AppConfig {
     pub window_height: u32,      // 记住的窗口高度（物理像素）
 }
 
-/// 平台默认全局快捷键：mac 用 Cmd+Shift+V，Windows/Linux 用 Ctrl+`
+/// 默认全局快捷键：全平台统一 Ctrl+`（mac 上即 Control+`）
 fn default_hotkey() -> String {
-    if cfg!(target_os = "macos") {
-        "Cmd+Shift+V".into()
-    } else {
-        "Ctrl+`".into()
-    }
+    "Ctrl+`".into()
 }
 
 /// 快捷键显示形式：mac 上把修饰键转成符号（⌃⇧⌥⌘），其他平台原样返回
@@ -2258,6 +2254,7 @@ pub fn run() {
             lan::lan_sweep,
             lan::lan_pair,
             lan::lan_unpair,
+            lan::lan_forget_device,
             lan::lan_sync_now,
             lan::lan_block,
             lan::lan_unblock,

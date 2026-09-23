@@ -682,6 +682,21 @@ function renderLanDevices(devices: LanDeviceDto[]) {
         refreshLanState();
       };
       actions.append(sync, unpair);
+      // 离线残留记录（对方换 IP/重装后旧记录还在）：允许手动删除，仅清理本机，不通知对方
+      if (!d.online) {
+        const forget = lanBtn("删除记录", "danger");
+        forget.onclick = async () => {
+          if (
+            !(await confirmDialog(
+              `确定删除「${d.name}」的本地配对记录？\n仅清理本机残留记录，不会通知对方；对方在线时请改用「解除配对」。`
+            ))
+          )
+            return;
+          await invoke("lan_forget_device", { deviceId: d.device_id });
+          refreshLanState();
+        };
+        actions.appendChild(forget);
+      }
     }
     const block = lanBtn("拉黑", "danger");
     block.onclick = async () => {
@@ -921,7 +936,7 @@ listen<AppConfig>("config-changed", (e) => {
   configDirEl.value = config.config_dir || "";
   themeEl.value = config.theme;
   fontFamilyEl.value = config.font_family;
-  fontSizeEl.value = String(config.font_size);
+  fontSizeEl.value = String(config.font_size || 14);
   maxItemsEl.value = String(config.max_items);
   retentionValueEl.value = String(config.retention_value ?? 0);
   retentionUnitEl.value = config.retention_unit || "days";
