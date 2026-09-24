@@ -34,14 +34,18 @@
 
       <section class="card">
         <h2>接收</h2>
+        <p class="desc">本机：<code id="tf-self">获取中…</code>（其他设备可据此确认接收方身份）</p>
         <label class="check"><input id="tf-auto-accept" type="checkbox" /> 自动接收文件（关闭时每次收到文件都需要手动确认）</label>
         <p class="desc">同一局域网的设备都可以向本机发送文件（需开启「可被发现」或「共享剪贴板」以启动本机服务）。收到的文件保存到：</p>
-        <p class="desc tf-dir"><code id="tf-dir">…</code></p>
+        <p class="desc tf-dir"><code id="tf-dir">…</code> <button id="tf-open-dir" class="btn small">打开目录</button></p>
         <p class="desc">与局域网同步的「文件存储路径」一致，可在 设置 → 局域网同步 → 同步选项 中修改；未设置时使用系统下载目录。</p>
       </section>
 
       <section class="card">
         <h2>传输记录 <button id="tf-clear" class="btn small">清空</button></h2>
+        <div class="row" style="margin-bottom: 8px">
+          <input id="tf-search" type="text" placeholder="搜索文件名或来源设备…" autocomplete="off" />
+        </div>
         <div id="tf-history" class="lan-list"><p class="desc">暂无记录</p></div>
       </section>
     </div>

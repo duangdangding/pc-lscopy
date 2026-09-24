@@ -19,6 +19,8 @@ interface LanDeviceDto {
 }
 
 interface LanStateDto {
+  device_name: string;
+  local_ip: string;
   download_dir: string;
   transfer_auto_accept: boolean;
   devices: LanDeviceDto[];
@@ -127,6 +129,10 @@ async function refreshDevices() {
     const s = await invoke<LanStateDto>("lan_get_state");
     devices = s.devices;
     $("#tf-dir").textContent = s.download_dir.trim() || "系统下载目录";
+    // 本机信息：名称 + IP，便于发送方确认接收对象
+    $("#tf-self").textContent = s.local_ip
+      ? `${s.device_name}（${s.local_ip}）`
+      : `${s.device_name}（未联网）`;
     // 自动接收开关：仅当用户没在操作该复选框时回填（避免轮询打断点击）
     const autoEl = $<HTMLInputElement>("#tf-auto-accept");
     if (document.activeElement !== autoEl) autoEl.checked = s.transfer_auto_accept;
@@ -233,13 +239,17 @@ function showProgress(show: boolean) {
 
 // ---------- 传输记录 ----------
 
+let historyItems: TransferDto[] = [];
+
 function renderHistory(items: TransferDto[]) {
   const listEl = $<HTMLDivElement>("#tf-history");
   listEl.innerHTML = "";
   if (!items.length) {
     const p = document.createElement("p");
     p.className = "desc";
-    p.textContent = "暂无记录（只保留接收成功的文件）";
+    p.textContent = historyItems.length
+      ? "没有匹配的记录"
+      : "暂无记录（只保留接收成功的文件）";
     listEl.appendChild(p);
     return;
   }
@@ -298,9 +308,23 @@ function renderHistory(items: TransferDto[]) {
   }
 }
 
+// 按文件名 / 来源设备过滤传输记录
+function applyHistoryFilter() {
+  const kw = $<HTMLInputElement>("#tf-search").value.trim().toLowerCase();
+  const filtered = kw
+    ? historyItems.filter(
+        (t) =>
+          t.file_name.toLowerCase().includes(kw) ||
+          t.peer.toLowerCase().includes(kw)
+      )
+    : historyItems;
+  renderHistory(filtered);
+}
+
 async function refreshHistory() {
   try {
-    renderHistory(await invoke<TransferDto[]>("transfer_history"));
+    historyItems = await invoke<TransferDto[]>("transfer_history");
+    applyHistoryFilter();
   } catch {
     /* 后端未就绪时静默 */
   }
@@ -423,6 +447,18 @@ $<HTMLInputElement>("#tf-manual-ip").addEventListener("keydown", (e) => {
 $("#tf-auto-accept").addEventListener("change", async (e) => {
   const checked = (e.target as HTMLInputElement).checked;
   await invoke("lan_update_settings", { patch: { transfer_auto_accept: checked } });
+});
+
+// 搜索框输入即时过滤
+$<HTMLInputElement>("#tf-search").addEventListener("input", applyHistoryFilter);
+
+// 打开接收文件的保存目录（目录路径由后端解析，含系统下载目录回落）
+$("#tf-open-dir").addEventListener("click", async () => {
+  try {
+    await invoke("transfer_open_dir");
+  } catch (e) {
+    alert(String(e));
+  }
 });
 
 $("#tf-clear").addEventListener("click", async () => {

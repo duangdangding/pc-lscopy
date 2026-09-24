@@ -807,30 +807,45 @@ pub fn transfer_clear_history(state: State<AppState>, delete_file: bool) -> Resu
     Ok(())
 }
 
-/// 在系统文件管理器中定位文件（Windows 选中文件；macOS 访达中显示）
+/// 在系统文件管理器中定位文件（Windows 选中文件；macOS 访达中显示）；传入目录时直接打开该目录
 #[tauri::command]
 pub fn transfer_reveal(path: String) -> Result<(), String> {
     let p = PathBuf::from(&path);
     if !p.exists() {
         return Err("文件不存在（可能已被移动或删除）".to_string());
     }
+    let is_dir = p.is_dir();
     #[cfg(target_family = "windows")]
     {
-        std::process::Command::new("explorer")
-            .arg(format!("/select,{path}"))
-            .spawn()
-            .map_err(|e| e.to_string())?;
+        let mut cmd = std::process::Command::new("explorer");
+        if is_dir {
+            cmd.arg(&path);
+        } else {
+            cmd.arg(format!("/select,{path}"));
+        }
+        cmd.spawn().map_err(|e| e.to_string())?;
         return Ok(());
     }
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open")
-            .arg("-R")
-            .arg(&path)
-            .spawn()
-            .map_err(|e| e.to_string())?;
+        let mut cmd = std::process::Command::new("open");
+        if !is_dir {
+            cmd.arg("-R");
+        }
+        cmd.arg(&path).spawn().map_err(|e| e.to_string())?;
         return Ok(());
     }
     #[allow(unreachable_code)]
     Err("当前平台不支持".to_string())
 }
+
+/// 打开接收文件的保存目录（「文件存储路径」，未设置时为系统下载目录）
+#[tauri::command]
+pub fn transfer_open_dir(app: AppHandle) -> Result<(), String> {
+    let dir = recv_dir(&app).ok_or("无法确定保存目录")?;
+    if !dir.exists() {
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    }
+    transfer_reveal(dir.to_string_lossy().to_string())
+}
+

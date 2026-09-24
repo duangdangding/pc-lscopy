@@ -1011,6 +1011,9 @@ autoCheckEl.addEventListener("change", () => setAutoCheckEnabled(autoCheckEl.che
 $("#btn-open-repo").addEventListener("click", () =>
   openUrl("https://github.com/duangdangding/pc-lscopy")
 );
+$("#btn-open-repo-android").addEventListener("click", () =>
+  openUrl("https://github.com/duangdangding/android-copy")
+);
 
 async function initAboutTab() {
   curVersionEl.textContent = `v${await getVersion()}`;

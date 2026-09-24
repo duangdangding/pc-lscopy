@@ -2268,7 +2268,8 @@ pub fn run() {
             lan::transfer::transfer_history,
             lan::transfer::transfer_delete,
             lan::transfer::transfer_clear_history,
-            lan::transfer::transfer_reveal
+            lan::transfer::transfer_reveal,
+            lan::transfer::transfer_open_dir
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
