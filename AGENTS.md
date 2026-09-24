@@ -131,6 +131,12 @@ cargo clippy           # lint
   （`%APPDATA%`）的配置会在首次启动时自动迁移。落盘统一走 `persist_config`（锁顺序固定 config → lan.settings → config_file）。
 - 主窗口失焦自动隐藏是**延迟 150ms 复查**实现的（拖动/缩放会造成瞬时失焦）；改动窗口事件逻辑时注意 `dragging` / `panel_pinned` / `main_focused` 三个状态。
 - 版本号需同步修改 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 三处（`Cargo.lock` 随构建自动更新）。
+- **应用内更新（Tauri updater）**：`tauri.conf.json` 已开启 `createUpdaterArtifacts` 并配置 pubkey/endpoints，
+  私钥在本机 `~/.tauri/lscopy.key`（密码在同目录 `.password` 文件，务必备份）；GitHub secrets 已配置
+  `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。本地 `bun run tauri build` 若因缺
+  签名私钥报错，设环境变量 `TAURI_SIGNING_PRIVATE_KEY_PATH` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 即可。
+  **注意**：`APPLE_*` 签名环境变量未配置时绝不能以空字符串传入 workflow（Tauri CLI 只判断变量存在性），
+  需要 macOS 签名时按 SIGNING.md 把 env 行加回。
 - **发布流程**（新会话发布按此完整执行）：
   1. 验证：`bun run build` + `cargo check` / `cargo clippy` 全绿；版本号三处已同步。
   2. 提交并推送：`git add -A && git commit` → `git push origin main` → `git tag vX.Y.Z && git push origin vX.Y.Z`。
