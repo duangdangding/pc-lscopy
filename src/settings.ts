@@ -1,8 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getVersion } from "@tauri-apps/api/app";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { relaunch } from "@tauri-apps/plugin-process";
 import { applyAppearance, AppConfig, DEFAULT_HOTKEY, formatHotkey, isMac, loadConfig } from "./config";
 import { confirmDialog, choiceDialog } from "./confirm";
+import { autoCheckEnabled, checkUpdate, resetUpdateCache, setAutoCheckEnabled, UpdateInfo } from "./updater";
 
 const $ = <T extends HTMLElement>(sel: string) =>
   document.querySelector<T>(sel)!;
@@ -33,10 +37,11 @@ document.querySelectorAll<HTMLButtonElement>(".tabs .tab").forEach((tab) => {
     const panel = $(`#tab-${tab.dataset.tab}`);
     panel.hidden = false;
     if (tab.dataset.tab === "database") refreshDbInfo();
+    if (tab.dataset.tab === "about") initAboutTab();
     setLanPolling(tab.dataset.tab === "sync");
-    // 局域网同步页的所有设置即时生效，隐藏底部「保存设置」栏
+    // 局域网同步页的所有设置即时生效，隐藏底部「保存设置」栏；关于页也不需要
     document.querySelector<HTMLElement>(".settings-footer")!.hidden =
-      tab.dataset.tab === "sync";
+      tab.dataset.tab === "sync" || tab.dataset.tab === "about";
   };
 });
 
@@ -921,6 +926,101 @@ function initFontPicker(fonts: string[]) {
 listen<AppConfig>("config-changed", (e) => {
   applyAppearance(e.payload);
   enabledEl.checked = e.payload.enabled;
+});
+
+// ---------- 关于 / 版本更新 ----------
+const curVersionEl = $<HTMLSpanElement>("#cur-version");
+const latestVersionEl = $<HTMLSpanElement>("#latest-version");
+const updateStatusEl = $<HTMLParagraphElement>("#update-status");
+const updateNotesEl = $<HTMLParagraphElement>("#update-notes");
+const checkUpdateBtn = $<HTMLButtonElement>("#btn-check-update");
+const doUpdateBtn = $<HTMLButtonElement>("#btn-do-update");
+const relaunchBtn = $<HTMLButtonElement>("#btn-relaunch");
+const updateProgressEl = $<HTMLDivElement>("#update-progress");
+const updateProgressBarEl = $<HTMLDivElement>("#update-progress-bar");
+const autoCheckEl = $<HTMLInputElement>("#auto-check-update");
+
+let pendingUpdate: UpdateInfo | null = null;
+
+function showUpdateResult(info: UpdateInfo | null) {
+  pendingUpdate = info;
+  if (info) {
+    latestVersionEl.textContent = `v${info.version}`;
+    updateStatusEl.textContent = "发现新版本，可直接下载安装。";
+    if (info.notes) {
+      updateNotesEl.hidden = false;
+      updateNotesEl.textContent = info.notes;
+    }
+    doUpdateBtn.hidden = false;
+  } else {
+    latestVersionEl.textContent = "已是最新";
+    updateStatusEl.textContent = "当前已是最新版本。";
+  }
+}
+
+async function runCheck(manual: boolean) {
+  if (manual) resetUpdateCache();
+  checkUpdateBtn.disabled = true;
+  updateStatusEl.textContent = "正在检查更新…";
+  const info = await checkUpdate();
+  checkUpdateBtn.disabled = false;
+  showUpdateResult(info);
+}
+
+checkUpdateBtn.addEventListener("click", () => runCheck(true));
+
+doUpdateBtn.addEventListener("click", async () => {
+  if (!pendingUpdate) return;
+  doUpdateBtn.hidden = true;
+  checkUpdateBtn.disabled = true;
+  updateProgressEl.hidden = false;
+  let total = 0;
+  let downloaded = 0;
+  try {
+    await pendingUpdate.update.downloadAndInstall((ev) => {
+      if (ev.event === "Started") {
+        total = ev.data.contentLength ?? 0;
+        updateStatusEl.textContent = "开始下载更新包…";
+      } else if (ev.event === "Progress") {
+        downloaded += ev.data.chunkLength;
+        if (total > 0) {
+          const pct = Math.min(100, Math.round((downloaded / total) * 100));
+          updateProgressBarEl.style.width = `${pct}%`;
+          updateStatusEl.textContent = `下载中… ${pct}%`;
+        }
+      } else if (ev.event === "Finished") {
+        updateProgressBarEl.style.width = "100%";
+        updateStatusEl.textContent = "下载完成，正在安装…";
+      }
+    });
+    // Windows 下安装程序会自动重启应用；macOS 需要手动重启生效
+    updateStatusEl.textContent = "安装完成，重启后生效。";
+    relaunchBtn.hidden = false;
+  } catch (e) {
+    updateStatusEl.textContent = `更新失败：${e}`;
+    checkUpdateBtn.disabled = false;
+    doUpdateBtn.hidden = false;
+  }
+});
+
+relaunchBtn.addEventListener("click", () => relaunch());
+
+autoCheckEl.checked = autoCheckEnabled();
+autoCheckEl.addEventListener("change", () => setAutoCheckEnabled(autoCheckEl.checked));
+
+$("#btn-open-repo").addEventListener("click", () =>
+  openUrl("https://github.com/duangdangding/pc-lscopy")
+);
+
+async function initAboutTab() {
+  curVersionEl.textContent = `v${await getVersion()}`;
+  // 首次切到该页时自动检查一次（之后手动点「检查更新」刷新）
+  if (latestVersionEl.textContent === "尚未检查") runCheck(false);
+}
+
+// 主面板「去更新」横幅跳转：切到关于页
+listen("open-update-tab", () => {
+  document.querySelector<HTMLButtonElement>('.tabs .tab[data-tab="about"]')?.click();
 });
 
 (async () => {

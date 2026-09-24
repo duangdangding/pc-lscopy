@@ -153,5 +153,5 @@ cargo clippy           # lint
      （新功能 / 升级提醒 / 其他），`GET /releases/tags/vX.Y.Z` 拿 release id →
      `PATCH /releases/{id}` 写入 `body`；若 `draft: true` 再 PATCH `{"draft": false}` 发布
      （当前 workflow 产出即非 draft，写 body 即生效）。
-     核对：重新 GET，确认 body 首尾完整、assets 数量正确（通常 10 个：setup/msi/portable + 双 dmg + 双 app.tar.gz + 3 个 sha256sums 校验文件）。
+     核对：重新 GET，确认 body 首尾完整、assets 数量正确（通常 14 个：setup/msi/portable + 双 dmg + 双 app.tar.gz + 3 个 updater 签名 .sig + latest.json + 3 个 sha256sums 校验文件）。
 - `dist/`、`target/`、`node_modules/` 为构建产物，不要提交或编辑。

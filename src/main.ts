@@ -1,9 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { applyAppearance, AppConfig, DEFAULT_HOTKEY, formatHotkey, isMac, loadConfig } from "./config";
 import { confirmDialog } from "./confirm";
+import { autoCheckEnabled, checkUpdate } from "./updater";
 
 interface Clip {
   id: number;
@@ -351,6 +352,15 @@ listen<AppConfig>("config-changed", (e) => {
   toggleEnabledEl.checked = config.enabled;
 });
 
+// ---------- 更新提示：启动时静默检查，有新版则在面板顶部显示横幅 ----------
+const updateBannerEl = document.querySelector<HTMLDivElement>("#update-banner")!;
+const updateBannerTextEl = document.querySelector<HTMLSpanElement>("#update-banner-text")!;
+document.querySelector<HTMLButtonElement>("#update-banner-btn")!.onclick = async () => {
+  // 打开设置并切到「关于」页（设置窗口随应用启动已加载，直接发事件即可）
+  await invoke("open_settings");
+  await emit("open-update-tab");
+};
+
 (async () => {
   config = await loadConfig();
   applyAppearance(config);
@@ -358,4 +368,13 @@ listen<AppConfig>("config-changed", (e) => {
   applyPinState();
   toggleEnabledEl.checked = config.enabled;
   refresh();
+
+  if (autoCheckEnabled()) {
+    checkUpdate().then((info) => {
+      if (info) {
+        updateBannerTextEl.textContent = `发现新版本 v${info.version}`;
+        updateBannerEl.hidden = false;
+      }
+    });
+  }
 })();

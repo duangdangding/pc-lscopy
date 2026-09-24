@@ -1076,3 +1076,44 @@ input[type="radio"] {
 .tf-toast-close:hover {
   color: var(--text);
 }
+
+
+/* ---------- 更新提示横幅（主面板顶部） ---------- */
+.update-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 6px 10px 0;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-item));
+  color: var(--accent);
+  font-size: 12px;
+}
+
+.update-banner[hidden] {
+  display: none;
+}
+
+/* ---------- 更新下载进度条（设置页） ---------- */
+.update-progress {
+  margin-top: 10px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg-item);
+  overflow: hidden;
+}
+
+.update-progress[hidden] {
+  display: none;
+}
+
+.update-progress-bar {
+  height: 100%;
+  width: 0;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}

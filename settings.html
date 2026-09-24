@@ -19,6 +19,7 @@
         <button class="tab" data-tab="database">数据库</button>
         <button class="tab" data-tab="sync">局域网同步</button>
         <button class="tab" data-tab="delete">删除管理</button>
+        <button class="tab" data-tab="about">关于</button>
       </nav>
 
       <!-- 常规 -->
@@ -246,6 +247,40 @@
             <button id="btn-del-between" class="btn danger">删除该区间记录</button>
           </div>
           <p class="desc" id="del-result"></p>
+        </section>
+      </div>
+
+      <!-- 关于 / 版本更新 -->
+      <div class="tab-panel" id="tab-about" hidden>
+        <section class="card">
+          <h2>版本更新</h2>
+          <div class="lan-info-grid">
+            <span class="lan-label">当前版本</span>
+            <span class="lan-value" id="cur-version">…</span>
+
+            <span class="lan-label">最新版本</span>
+            <span class="lan-value" id="latest-version">尚未检查</span>
+          </div>
+          <div class="row" style="margin-top: 12px">
+            <button id="btn-check-update" class="btn">检查更新</button>
+            <button id="btn-do-update" class="btn primary" hidden>下载并安装</button>
+            <button id="btn-relaunch" class="btn primary" hidden>重启完成更新</button>
+          </div>
+          <div id="update-progress" class="update-progress" hidden>
+            <div id="update-progress-bar" class="update-progress-bar"></div>
+          </div>
+          <p class="desc" id="update-status"></p>
+          <p class="desc" id="update-notes" hidden></p>
+          <label class="check"><input id="auto-check-update" type="checkbox" /> 启动时自动检查更新</label>
+          <p class="desc">更新来自 GitHub Releases，下载后自动安装，无需再手动打开网页下载。</p>
+        </section>
+
+        <section class="card">
+          <h2>关于</h2>
+          <p class="desc">共享剪贴板-卢（lscopy）：Windows / macOS 桌面共享剪贴板管理工具，支持历史记录、局域网多设备同步与互传文件。</p>
+          <div class="row">
+            <button id="btn-open-repo" class="btn">打开 GitHub 仓库</button>
+          </div>
         </section>
       </div>
 
