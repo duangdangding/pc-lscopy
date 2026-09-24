@@ -23,6 +23,9 @@ jobs:
           - os: macos-latest
             target: x86_64-apple-darwin
     runs-on: ${{ matrix.os }}
+    env:
+      # 用于条件判断：secrets 不能出现在 if: 里，先映射到 job 级 env
+      WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
     steps:
       - uses: actions/checkout@v4
 
@@ -41,10 +44,46 @@ jobs:
       - name: Install frontend dependencies
         run: bun install
 
+      # Windows 代码签名：仅在配置了 WINDOWS_CERT_PFX secret 时启用。
+      # 解出证书文件并向 tauri.conf.json 注入 bundle.windows.signCommand，
+      # Tauri 打包时会用它给 exe / NSIS 安装包 / MSI 逐个签名。
+      - name: Prepare Windows code signing
+        if: matrix.os == 'windows-latest' && env.WINDOWS_CERT_PFX != ''
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $certPath = "$env:RUNNER_TEMP\lscopy-cert.pfx"
+          [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX))
+          "WINDOWS_CERT_PATH=$certPath" >> $env:GITHUB_ENV
+          "WINDOWS_CERT_PASSWORD=$env:WINDOWS_CERT_PASSWORD" >> $env:GITHUB_ENV
+
+          $confPath = 'src-tauri/tauri.conf.json'
+          $json = Get-Content $confPath -Raw | ConvertFrom-Json
+          $sign = [pscustomobject]@{
+            cmd  = 'pwsh'
+            args = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'sign-windows.ps1', '%1')
+          }
+          if ($json.bundle.PSObject.Properties['windows']) {
+            $json.bundle.windows | Add-Member -NotePropertyName signCommand -NotePropertyValue $sign -Force
+          } else {
+            $json.bundle | Add-Member -NotePropertyName windows -NotePropertyValue ([pscustomobject]@{ signCommand = $sign })
+          }
+          $json | ConvertTo-Json -Depth 20 | Set-Content $confPath -Encoding utf8
+
+      # macOS 签名 + 公证：配置 APPLE_* secrets 后自动生效
+      # （APPLE_CERTIFICATE 为 base64 的 .p12；APPLE_ID/APPLE_PASSWORD/APPLE_TEAM_ID 用于公证，
+      #   APPLE_PASSWORD 是 App 专用密码而非登录密码）。
       - name: Build and upload release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_CERTIFICATE: ${{ matrix.os == 'macos-latest' && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ matrix.os == 'macos-latest' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ matrix.os == 'macos-latest' && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_ID: ${{ matrix.os == 'macos-latest' && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ matrix.os == 'macos-latest' && secrets.APPLE_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ matrix.os == 'macos-latest' && secrets.APPLE_TEAM_ID || '' }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "lscopy ${{ github.ref_name }}"
@@ -63,3 +102,46 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           files: src-tauri/target/release/lscopy_${{ github.ref_name }}_x64_portable.exe
+
+      # 为本次构建的全部产物生成 SHA-256 校验文件
+      - name: Generate SHA-256 checksums (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $files = @()
+          $files += Get-ChildItem 'src-tauri/target/release/bundle/nsis/*.exe' -ErrorAction SilentlyContinue
+          $files += Get-ChildItem 'src-tauri/target/release/bundle/msi/*.msi' -ErrorAction SilentlyContinue
+          $files += Get-ChildItem 'src-tauri/target/release/lscopy_*_x64_portable.exe' -ErrorAction SilentlyContinue
+          if ($files.Count -eq 0) { throw '未找到任何发布产物' }
+          $files | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          } | Set-Content 'sha256sums-windows.txt' -Encoding utf8
+          Get-Content 'sha256sums-windows.txt'
+
+      - name: Generate SHA-256 checksums (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          set -e
+          if [ -n "${{ matrix.target }}" ]; then
+            DIR="src-tauri/target/${{ matrix.target }}/release/bundle"
+            SUFFIX="macos-x86_64"
+          else
+            DIR="src-tauri/target/release/bundle"
+            SUFFIX="macos-arm64"
+          fi
+          OUT="sha256sums-$SUFFIX.txt"
+          : > "$OUT"
+          found=0
+          for f in "$DIR"/dmg/*.dmg "$DIR"/macos/*.app.tar.gz; do
+            [ -e "$f" ] || continue
+            found=1
+            (cd "$(dirname "$f")" && shasum -a 256 "$(basename "$f")") >> "$OUT"
+          done
+          [ "$found" -eq 1 ] || { echo "未找到任何发布产物"; exit 1; }
+          cat "$OUT"
+
+      - name: Upload SHA-256 checksums
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: sha256sums-*.txt

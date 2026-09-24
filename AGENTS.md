@@ -135,6 +135,13 @@ cargo clippy           # lint
   1. 验证：`bun run build` + `cargo check` / `cargo clippy` 全绿；版本号三处已同步。
   2. 提交并推送：`git add -A && git commit` → `git push origin main` → `git tag vX.Y.Z && git push origin vX.Y.Z`。
      推 `v*` tag 触发 `.github/workflows/release.yml`，Windows + macOS 并行构建（约 10–20 分钟）。
+     - **代码签名**（可选，配了 secrets 才生效）：Windows 需 `WINDOWS_CERT_PFX`（base64 的 .pfx）+
+       `WINDOWS_CERT_PASSWORD`，CI 会向 tauri.conf.json 注入 `signCommand` 调 `src-tauri/sign-windows.ps1`
+       给 exe / NSIS / MSI 签名；macOS 需 `APPLE_CERTIFICATE`（base64 的 .p12）/ `APPLE_CERTIFICATE_PASSWORD` /
+       `APPLE_SIGNING_IDENTITY` / `APPLE_ID` / `APPLE_PASSWORD`（App 专用密码）/ `APPLE_TEAM_ID`，
+       tauri-action 自动完成签名 + 公证。未配置则构建未签名产物，不报错。
+     - **SHA-256 校验**：每个构建任务生成并上传 `sha256sums-windows.txt` / `sha256sums-macos-arm64.txt` /
+       `sha256sums-macos-x86_64.txt`，覆盖该任务的全部产物。
   3. **GitHub API 凭据**：本机无 `gh` CLI，token 在 Windows 凭据管理器（git credential manager）里，
      用 `printf "protocol=https\nhost=github.com\n\n" | git credential fill` 取 `password=` 行即为
      token（用户 duangdangding，scope 含 repo/workflow）。**任何时候不得明文打印 token**：
@@ -146,5 +153,5 @@ cargo clippy           # lint
      （新功能 / 升级提醒 / 其他），`GET /releases/tags/vX.Y.Z` 拿 release id →
      `PATCH /releases/{id}` 写入 `body`；若 `draft: true` 再 PATCH `{"draft": false}` 发布
      （当前 workflow 产出即非 draft，写 body 即生效）。
-     核对：重新 GET，确认 body 首尾完整、assets 数量正确（通常 7 个：setup/msi/portable + 双 dmg + 双 app.tar.gz）。
+     核对：重新 GET，确认 body 首尾完整、assets 数量正确（通常 10 个：setup/msi/portable + 双 dmg + 双 app.tar.gz + 3 个 sha256sums 校验文件）。
 - `dist/`、`target/`、`node_modules/` 为构建产物，不要提交或编辑。
