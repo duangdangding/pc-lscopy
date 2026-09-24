@@ -1999,6 +1999,154 @@ fn toggle_window(app: &AppHandle) {
     }
 }
 
+// ---------- 便携版应用内更新 ----------
+// NSIS 安装版走 tauri-plugin-updater 官方流程（NSIS 会装回注册表记录的原目录）；
+// 绿色便携版是单文件 exe，不能装到别处（配置/数据库都在 exe 同目录），这里实现
+// 「下载便携版 exe 到本目录 → 校验 SHA-256 → 退出后由 PowerShell 脚本替换并重启」。
+
+/// 判断当前是安装版还是便携版：注册表有 NSIS 卸载项即安装版
+#[tauri::command]
+fn update_install_kind() -> String {
+    #[cfg(target_family = "windows")]
+    {
+        use winreg::enums::*;
+        use winreg::RegKey;
+        for hive in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+            for key in ["lscopy", "com.lsh.lscopy"] {
+                let path =
+                    format!("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{key}");
+                if RegKey::predef(hive).open_subkey(&path).is_ok() {
+                    return "installed".to_string();
+                }
+            }
+        }
+        "portable".to_string()
+    }
+    #[cfg(not(target_family = "windows"))]
+    "installed".to_string()
+}
+
+/// 计算便携版 exe 的下载目标路径：默认 exe 同目录的 lscopy_new.exe（等替换）；
+/// 指定目录时为该目录下的 lscopy.exe（用户选择「下载到其他目录」）
+#[tauri::command]
+fn portable_update_begin(target_dir: Option<String>) -> Result<String, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe_dir = exe
+        .parent()
+        .ok_or("无法确定程序目录")?
+        .to_path_buf();
+    let (dir, name) = match target_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(d) => (std::path::PathBuf::from(d), "lscopy.exe"),
+        None => (exe_dir, "lscopy_new.exe"),
+    };
+    std::fs::create_dir_all(&dir).map_err(|e| format!("无法写入目录 {}: {e}", dir.display()))?;
+    let path = dir.join(name);
+    if path.exists() {
+        let _ = std::fs::remove_file(&path);
+    }
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// 流式下载更新包到指定路径，进度通过 portable-update-progress 事件回传
+#[tauri::command]
+async fn portable_update_download(app: AppHandle, url: String, path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use std::io::Read;
+        let resp = ureq::get(&url)
+            .call()
+            .map_err(|e| format!("下载失败: {e}"))?;
+        let total: u64 = resp
+            .header("content-length")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let mut reader = resp.into_reader();
+        let mut file = std::fs::File::create(&path)
+            .map_err(|e| format!("无法创建文件 {path}: {e}"))?;
+        let mut buf = [0u8; 65536];
+        let mut sent: u64 = 0;
+        loop {
+            let n = reader.read(&mut buf).map_err(|e| e.to_string())?;
+            if n == 0 {
+                break;
+            }
+            use std::io::Write;
+            file.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+            sent += n as u64;
+            let _ = app.emit(
+                "portable-update-progress",
+                serde_json::json!({ "sent": sent, "total": total }),
+            );
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 拉取文本资源（用于读取 Release 的 sha256sums 校验文件）
+#[tauri::command]
+async fn http_get_text(url: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        ureq::get(&url)
+            .call()
+            .map_err(|e| format!("请求失败: {e}"))?
+            .into_string()
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 校验下载文件的 SHA-256（与 Release 的 sha256sums 比对，防止下载损坏/被篡改）
+#[tauri::command]
+fn portable_update_verify(path: String, expected_sha256: String) -> Result<bool, String> {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    let digest = Sha256::digest(&bytes);
+    let got: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    Ok(got.eq_ignore_ascii_case(expected_sha256.trim()))
+}
+
+/// 退出本进程，由 PowerShell 辅助脚本等待退出后替换 exe 并重启新版
+#[tauri::command]
+fn portable_update_apply(app: AppHandle, new_path: String) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let script = std::env::temp_dir().join("lscopy-update.ps1");
+    let content = concat!(
+        "param([int]$OldPid, [string]$New, [string]$Old)\n",
+        "while (Get-Process -Id $OldPid -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 500 }\n",
+        "Move-Item -Force -LiteralPath $New -Destination $Old\n",
+        "Start-Process -FilePath $Old\n",
+        "Remove-Item -Force -LiteralPath $MyInvocation.MyCommand.Path\n"
+    );
+    // 写 UTF-8 BOM，保证中文路径在 PowerShell 下正确解析
+    std::fs::write(&script, format!("\u{feff}{content}")).map_err(|e| e.to_string())?;
+    std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-File",
+        ])
+        .arg(&script)
+        .arg("-OldPid")
+        .arg(std::process::id().to_string())
+        .arg("-New")
+        .arg(&new_path)
+        .arg("-Old")
+        .arg(&exe)
+        .spawn()
+        .map_err(|e| format!("启动更新脚本失败: {e}"))?;
+    app.exit(0);
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -2269,7 +2417,13 @@ pub fn run() {
             lan::transfer::transfer_delete,
             lan::transfer::transfer_clear_history,
             lan::transfer::transfer_reveal,
-            lan::transfer::transfer_open_dir
+            lan::transfer::transfer_open_dir,
+            update_install_kind,
+            portable_update_begin,
+            portable_update_download,
+            portable_update_verify,
+            portable_update_apply,
+            http_get_text
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

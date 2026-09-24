@@ -935,12 +935,17 @@ const updateStatusEl = $<HTMLParagraphElement>("#update-status");
 const updateNotesEl = $<HTMLParagraphElement>("#update-notes");
 const checkUpdateBtn = $<HTMLButtonElement>("#btn-check-update");
 const doUpdateBtn = $<HTMLButtonElement>("#btn-do-update");
+const doUpdateDirBtn = $<HTMLButtonElement>("#btn-do-update-dir");
 const relaunchBtn = $<HTMLButtonElement>("#btn-relaunch");
 const updateProgressEl = $<HTMLDivElement>("#update-progress");
 const updateProgressBarEl = $<HTMLDivElement>("#update-progress-bar");
 const autoCheckEl = $<HTMLInputElement>("#auto-check-update");
+const installKindEl = $<HTMLParagraphElement>("#install-kind");
 
 let pendingUpdate: UpdateInfo | null = null;
+// 安装方式：installed = NSIS 安装版（走官方 updater，装回原目录）；
+// portable = 绿色便携版（就地替换 exe，配置/记录保留在同目录）
+let installKind = "installed";
 
 function showUpdateResult(info: UpdateInfo | null) {
   pendingUpdate = info;
@@ -952,6 +957,8 @@ function showUpdateResult(info: UpdateInfo | null) {
       updateNotesEl.textContent = info.notes;
     }
     doUpdateBtn.hidden = false;
+    // 便携版额外提供「下载到其他目录」（只下载不安装，用户自行替换/运行）
+    doUpdateDirBtn.hidden = installKind !== "portable";
   } else {
     latestVersionEl.textContent = "已是最新";
     updateStatusEl.textContent = "当前已是最新版本。";
@@ -969,8 +976,82 @@ async function runCheck(manual: boolean) {
 
 checkUpdateBtn.addEventListener("click", () => runCheck(true));
 
+// 便携版更新：下载便携版 exe 到程序所在目录（或用户指定目录），
+// 与 Release 的 sha256sums 比对后，退出并由辅助脚本替换旧 exe 自动重启
+async function portableUpdate(toOtherDir: boolean) {
+  if (!pendingUpdate) return;
+  let targetDir: string | null = null;
+  if (toOtherDir) {
+    targetDir = await open({ directory: true, title: "选择新版本保存目录" });
+    if (!targetDir) return;
+  }
+  const ver = pendingUpdate.version;
+  const base = `https://github.com/duangdangding/pc-lscopy/releases/download/v${ver}`;
+  doUpdateBtn.hidden = true;
+  doUpdateDirBtn.hidden = true;
+  checkUpdateBtn.disabled = true;
+  updateProgressEl.hidden = false;
+  const unlisten = await listen<{ sent: number; total: number }>(
+    "portable-update-progress",
+    (e) => {
+      const { sent, total } = e.payload;
+      if (total > 0) {
+        const pct = Math.min(100, Math.round((sent / total) * 100));
+        updateProgressBarEl.style.width = `${pct}%`;
+        updateStatusEl.textContent = `下载中… ${pct}%`;
+      }
+    }
+  );
+  try {
+    const path = await invoke<string>("portable_update_begin", { targetDir });
+    updateStatusEl.textContent = "开始下载更新包…";
+    await invoke("portable_update_download", {
+      url: `${base}/lscopy_v${ver}_x64_portable.exe`,
+      path,
+    });
+    updateProgressBarEl.style.width = "100%";
+
+    // SHA-256 校验（校验文件取不到时跳过并提示，不阻断更新）
+    updateStatusEl.textContent = "校验文件完整性…";
+    try {
+      const sums = await invoke<string>("http_get_text", {
+        url: `${base}/sha256sums-windows.txt`,
+      });
+      const line = sums.split("\n").find((l) => l.includes("_x64_portable.exe"));
+      const expected = line?.trim().split(/\s+/)[0] || "";
+      if (expected) {
+        const ok = await invoke<boolean>("portable_update_verify", {
+          path,
+          expectedSha256: expected,
+        });
+        if (!ok) throw new Error("SHA-256 校验不一致，文件可能损坏，请重试");
+      }
+    } catch (e) {
+      if (String(e).includes("校验不一致")) throw e;
+      updateStatusEl.textContent = "未能获取校验文件，跳过完整性校验。";
+    }
+
+    if (toOtherDir) {
+      updateStatusEl.textContent = `已下载到 ${path}，关闭本软件后运行它即可。`;
+      await invoke("transfer_reveal", { path });
+    } else {
+      updateStatusEl.textContent = "下载完成，正在替换并重启…";
+      await invoke("portable_update_apply", { newPath: path });
+    }
+  } catch (e) {
+    updateStatusEl.textContent = `更新失败：${e}`;
+    checkUpdateBtn.disabled = false;
+    doUpdateBtn.hidden = false;
+    doUpdateDirBtn.hidden = installKind !== "portable";
+  } finally {
+    unlisten();
+  }
+}
+
 doUpdateBtn.addEventListener("click", async () => {
   if (!pendingUpdate) return;
+  if (installKind === "portable") return portableUpdate(false);
+
   doUpdateBtn.hidden = true;
   checkUpdateBtn.disabled = true;
   updateProgressEl.hidden = false;
@@ -1003,6 +1084,8 @@ doUpdateBtn.addEventListener("click", async () => {
   }
 });
 
+doUpdateDirBtn.addEventListener("click", () => portableUpdate(true));
+
 relaunchBtn.addEventListener("click", () => relaunch());
 
 autoCheckEl.checked = autoCheckEnabled();
@@ -1017,6 +1100,17 @@ $("#btn-open-repo-android").addEventListener("click", () =>
 
 async function initAboutTab() {
   curVersionEl.textContent = `v${await getVersion()}`;
+  // 安装方式提示：便携版说明就地替换逻辑（配置/记录保留在同目录）
+  try {
+    installKind = await invoke<string>("update_install_kind");
+    if (installKind === "portable") {
+      installKindEl.hidden = false;
+      installKindEl.textContent =
+        "当前为绿色便携版：更新会下载到本程序所在目录，替换旧文件后自动重启，配置和剪贴板记录都保留在原目录。";
+    }
+  } catch {
+    /* 检测失败按安装版处理 */
+  }
   // 首次切到该页时自动检查一次（之后手动点「检查更新」刷新）
   if (latestVersionEl.textContent === "尚未检查") runCheck(false);
 }
