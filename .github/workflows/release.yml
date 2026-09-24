@@ -71,20 +71,13 @@ jobs:
           }
           $json | ConvertTo-Json -Depth 20 | Set-Content $confPath -Encoding utf8
 
-      # macOS 签名 + 公证：配置 APPLE_* secrets 后自动生效
-      # （APPLE_CERTIFICATE 为 base64 的 .p12；APPLE_ID/APPLE_PASSWORD/APPLE_TEAM_ID 用于公证，
-      #   APPLE_PASSWORD 是 App 专用密码而非登录密码）。
+      # 应用内更新包签名：tauri-action 检测到 updater 配置后自动生成 latest.json 与 .sig
+      # 注意：macOS 签名/公证的 APPLE_* 环境变量不能留空字符串（Tauri CLI 只判断变量
+      # 是否存在），未配置 Apple 证书时切勿传入，需签名时按 SIGNING.md 加回。
       - name: Build and upload release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APPLE_CERTIFICATE: ${{ matrix.os == 'macos-latest' && secrets.APPLE_CERTIFICATE || '' }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ matrix.os == 'macos-latest' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
-          APPLE_SIGNING_IDENTITY: ${{ matrix.os == 'macos-latest' && secrets.APPLE_SIGNING_IDENTITY || '' }}
-          APPLE_ID: ${{ matrix.os == 'macos-latest' && secrets.APPLE_ID || '' }}
-          APPLE_PASSWORD: ${{ matrix.os == 'macos-latest' && secrets.APPLE_PASSWORD || '' }}
-          APPLE_TEAM_ID: ${{ matrix.os == 'macos-latest' && secrets.APPLE_TEAM_ID || '' }}
-          # 应用内更新包签名：tauri-action 检测到 updater 配置后自动生成 latest.json 与 .sig
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:

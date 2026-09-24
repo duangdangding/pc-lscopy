@@ -62,6 +62,19 @@ Export-PfxCertificate -Cert $cert -FilePath "lscopy-cert.pfx" -Password $pwd
 | `APPLE_PASSWORD` | **不是登录密码**——[appleid.apple.com](https://appleid.apple.com) → 登录与安全 → App 专用密码，生成一个 |
 | `APPLE_TEAM_ID` | [developer.apple.com/account](https://developer.apple.com/account) → Membership details 里的 Team ID（10 位字母数字） |
 
+> **重要**：光配 secrets 还不够。Tauri CLI 判断 Apple 证书的方式是「环境变量是否存在」，
+> 传空字符串也会导致构建失败，所以 workflow 里默认不带这些变量。配置好 6 个 secret 后，
+> 还需在 `.github/workflows/release.yml` 的「Build and upload release」步骤 env 里加回：
+>
+> ```yaml
+>           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+>           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+>           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+>           APPLE_ID: ${{ secrets.APPLE_ID }}
+>           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+>           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+> ```
+
 tauri-action 会基于这些环境变量自动完成：证书导入临时钥匙串 → Developer ID 签名 → 公证 → staple。
 
 ---
