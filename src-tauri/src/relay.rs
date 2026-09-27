@@ -14,7 +14,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use aes_gcm::{
+    aead::{Aead, KeyInit, Payload},
+    Aes256Gcm, Nonce,
+};
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use futures_util::{SinkExt, StreamExt};
+use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -52,8 +58,68 @@ pub struct RelaySettings {
     pub group_id: String,
     /// 接入密钥（服务器 RELAY_ACCESS_KEYS 之一）
     pub access_key: String,
+    /// 分组密钥（可选）：填写后启用端到端加密，同组设备需一致；服务器只见到密文
+    pub group_key: String,
     /// 补拉游标：服务器分配的条目序号，连接成功后 pull sinceSeq=last_seq
     pub last_seq: i64,
+}
+
+// ---------- 端到端加密（M4，设计文档 §5） ----------
+//
+// 密钥派生：HKDF-SHA256(分组密钥, salt=固定, info=分组ID) → AES-256 密钥。
+// 分组密钥只在各设备本地，服务器无法派生（它只持有接入密钥）。
+// 加密粒度：仅 clip 的文本内容；remoteDeviceId/remoteId/timestamp/type 保持明文，
+// 供服务器路由与客户端环回防护，同时作为 AAD 绑定，篡改元数据会导致解密失败。
+
+/// 派生分组加密密钥
+fn e2e_key(group_key: &str, group_id: &str) -> [u8; 32] {
+    let hk = Hkdf::<Sha256>::new(Some(b"lscopy-relay-e2e"), group_key.as_bytes());
+    let mut k = [0u8; 32];
+    hk.expand(group_id.as_bytes(), &mut k).expect("HKDF 32 字节输出");
+    k
+}
+
+/// AAD：绑定元数据，防重放/篡改
+fn e2e_aad(device_id: &str, remote_id: i64, timestamp_ms: i64, wire_type: i64) -> Vec<u8> {
+    format!("{device_id}:{remote_id}:{timestamp_ms}:{wire_type}").into_bytes()
+}
+
+/// 加密文本 → base64(nonce ‖ ciphertext)
+fn e2e_encrypt(key: &[u8; 32], aad: &[u8], plain: &str) -> Option<String> {
+    let cipher = Aes256Gcm::new_from_slice(key).ok()?;
+    let nonce = rand::random::<[u8; 12]>();
+    let ct = cipher
+        .encrypt(
+            Nonce::from_slice(&nonce),
+            Payload {
+                msg: plain.as_bytes(),
+                aad,
+            },
+        )
+        .ok()?;
+    let mut buf = Vec::with_capacity(12 + ct.len());
+    buf.extend_from_slice(&nonce);
+    buf.extend_from_slice(&ct);
+    Some(B64.encode(buf))
+}
+
+/// 解密 base64(nonce ‖ ciphertext) → 文本；密钥不对/AAD 被篡改/格式损坏都返回 None
+fn e2e_decrypt(key: &[u8; 32], aad: &[u8], data: &str) -> Option<String> {
+    let buf = B64.decode(data.trim()).ok()?;
+    if buf.len() <= 12 {
+        return None;
+    }
+    let cipher = Aes256Gcm::new_from_slice(key).ok()?;
+    let pt = cipher
+        .decrypt(
+            Nonce::from_slice(&buf[..12]),
+            Payload {
+                msg: &buf[12..],
+                aad,
+            },
+        )
+        .ok()?;
+    String::from_utf8(pt).ok()
 }
 
 /// 规范化服务器地址：补 ws:// 前缀与 /ws 路径
@@ -122,7 +188,11 @@ impl RelayShared {
 pub fn push_local_text(state: &AppState, text: &str, hash: u64) {
     let tx = state.relay.tx.lock().unwrap().clone();
     let Some(tx) = tx else { return };
-    if !state.relay.settings.lock().unwrap().enabled {
+    let (enabled, group_id, group_key) = {
+        let s = state.relay.settings.lock().unwrap();
+        (s.enabled, s.group_id.clone(), s.group_key.clone())
+    };
+    if !enabled {
         return;
     }
     let my_id = state.lan.settings.lock().unwrap().device_id.clone();
@@ -136,28 +206,49 @@ pub fn push_local_text(state: &AppState, text: &str, hash: u64) {
         )
         .unwrap_or((0, now_secs()))
     };
-    let msg = json!({
-        "op": "push",
-        "clip": {
+    let timestamp_ms = created_at * 1000;
+    // 端到端加密：分组密钥非空时只发密文，元数据明文作 AAD 绑定
+    let clip = if group_key.is_empty() {
+        json!({
             "type": WIRE_TEXT,
             "text": text,
-            "timestamp": created_at * 1000,
+            "timestamp": timestamp_ms,
             "remoteDeviceId": my_id,
             "remoteId": id,
-        }
-    })
-    .to_string();
+        })
+    } else {
+        let key = e2e_key(&group_key, &group_id);
+        let aad = e2e_aad(&my_id, id, timestamp_ms, WIRE_TEXT);
+        let Some(data) = e2e_encrypt(&key, &aad, text) else {
+            return; // 加密失败静默丢弃（不降级发明文，避免用户误以为已加密）
+        };
+        json!({
+            "type": WIRE_TEXT,
+            "enc": 1,
+            "data": data,
+            "timestamp": timestamp_ms,
+            "remoteDeviceId": my_id,
+            "remoteId": id,
+        })
+    };
+    let msg = json!({ "op": "push", "clip": clip }).to_string();
     let _ = tx.send(msg);
 }
 
 // ---------- 接收链路（中继 → 入库） ----------
 
-/// 处理服务器推来的 clip：环回防护 + 仅文本 + 复用内容哈希查重入库
+/// 处理服务器推来的 clip：环回防护 + 仅文本 + （必要时解密）+ 复用内容哈希查重入库
 fn import_relay_clip(app: &AppHandle, clip: &Value) {
     let state = app.state::<AppState>();
-    let (my_id, allow_text) = {
-        let s = state.lan.settings.lock().unwrap();
-        (s.device_id.clone(), s.sync_text)
+    let (my_id, allow_text, group_id, group_key) = {
+        let lan = state.lan.settings.lock().unwrap();
+        let relay = state.relay.settings.lock().unwrap();
+        (
+            lan.device_id.clone(),
+            lan.sync_text,
+            relay.group_id.clone(),
+            relay.group_key.clone(),
+        )
     };
     // 环回防护：内容本来就来自本机
     let origin = clip.get("remoteDeviceId").and_then(|v| v.as_str());
@@ -165,16 +256,11 @@ fn import_relay_clip(app: &AppHandle, clip: &Value) {
         return;
     }
     // M2 仅同步文本（图片/文件仅局域网，见设计文档 §7.3）
-    if clip.get("type").and_then(|v| v.as_i64()) != Some(WIRE_TEXT) {
+    let wire_type = clip.get("type").and_then(|v| v.as_i64());
+    if wire_type != Some(WIRE_TEXT) {
         return;
     }
     if !allow_text {
-        return;
-    }
-    let Some(text) = clip.get("text").and_then(|v| v.as_str()) else {
-        return;
-    };
-    if text.is_empty() {
         return;
     }
     let created_at = clip
@@ -182,14 +268,43 @@ fn import_relay_clip(app: &AppHandle, clip: &Value) {
         .and_then(|v| v.as_i64())
         .map(|ms| (ms / 1000).max(0))
         .unwrap_or_else(now_secs);
+    let timestamp_ms = clip.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0);
     let remote_id = clip.get("remoteId").and_then(|v| v.as_i64());
+
+    // 密文条目：本机未配分组密钥则无法解密，跳过
+    let text: String = if clip.get("enc").and_then(|v| v.as_i64()) == Some(1) {
+        if group_key.is_empty() {
+            return;
+        }
+        let Some(data) = clip.get("data").and_then(|v| v.as_str()) else {
+            return;
+        };
+        let aad = e2e_aad(
+            origin.unwrap_or_default(),
+            remote_id.unwrap_or(0),
+            timestamp_ms,
+            wire_type.unwrap_or(0),
+        );
+        match e2e_decrypt(&e2e_key(&group_key, &group_id), &aad, data) {
+            Some(t) => t,
+            None => return, // 密钥不一致或数据被篡改
+        }
+    } else {
+        match clip.get("text").and_then(|v| v.as_str()) {
+            Some(t) => t.to_string(),
+            None => return,
+        }
+    };
+    if text.is_empty() {
+        return;
+    }
     let h = hash_bytes(text.as_bytes());
     let inserted = {
         let db = state.db.lock().unwrap();
         crate::lan::store_remote(
             &db,
             "text",
-            Some(text),
+            Some(&text),
             None,
             None,
             None,
@@ -274,7 +389,7 @@ fn handle_server_msg(app: &AppHandle, text: &str) {
 // ---------- 连接循环 ----------
 
 fn hmac_hex(key: &str, msg: &str) -> String {
-    let mut mac = HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC 接受任意长度密钥");
+    let mut mac = <HmacSha256 as Mac>::new_from_slice(key.as_bytes()).expect("HMAC 接受任意长度密钥");
     mac.update(msg.as_bytes());
     hex::encode(mac.finalize().into_bytes())
 }
@@ -477,6 +592,7 @@ pub struct RelayStateDto {
     server_url: String,
     group_id: String,
     access_key: String,
+    group_key: String,
     status: String,
     peers: Vec<PeerDto>,
 }
@@ -489,6 +605,7 @@ pub fn relay_get_state(state: State<AppState>) -> RelayStateDto {
         server_url: s.server_url,
         group_id: s.group_id,
         access_key: s.access_key,
+        group_key: s.group_key,
         status: state.relay.status.lock().unwrap().clone(),
         peers: state.relay.peers.lock().unwrap().clone(),
     }
@@ -500,6 +617,7 @@ pub struct RelaySettingsPatch {
     server_url: Option<String>,
     group_id: Option<String>,
     access_key: Option<String>,
+    group_key: Option<String>,
 }
 
 #[tauri::command]
@@ -522,10 +640,74 @@ pub fn relay_update_settings(
         if let Some(v) = patch.access_key {
             s.access_key = v.trim().to_string();
         }
+        if let Some(v) = patch.group_key {
+            s.group_key = v.trim().to_string();
+        }
     }
     // 代际 +1：连接循环感知后自动重连
     state.relay.gen.fetch_add(1, Ordering::SeqCst);
     crate::persist_config(&state)?;
     let _ = app.emit("relay-state-changed", ());
     Ok(())
+}
+
+
+// ---------- 测试 ----------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn e2e_roundtrip() {
+        let key = e2e_key("group-secret", "g1");
+        let aad = e2e_aad("dev-a", 42, 1_758_000_000_000, WIRE_TEXT);
+        let data = e2e_encrypt(&key, &aad, "机密文本 abc 123").unwrap();
+        let back = e2e_decrypt(&key, &aad, &data).unwrap();
+        assert_eq!(back, "机密文本 abc 123");
+    }
+
+    #[test]
+    fn e2e_wrong_key_or_group_fails() {
+        let key = e2e_key("group-secret", "g1");
+        let aad = e2e_aad("dev-a", 42, 1_758_000_000_000, WIRE_TEXT);
+        let data = e2e_encrypt(&key, &aad, "hello").unwrap();
+        // 密钥不同
+        assert!(e2e_decrypt(&e2e_key("other-secret", "g1"), &aad, &data).is_none());
+        // 分组不同（派生密钥不同）
+        assert!(e2e_decrypt(&e2e_key("group-secret", "g2"), &aad, &data).is_none());
+    }
+
+    #[test]
+    fn e2e_tampered_aad_fails() {
+        let key = e2e_key("group-secret", "g1");
+        let aad = e2e_aad("dev-a", 42, 1_758_000_000_000, WIRE_TEXT);
+        let data = e2e_encrypt(&key, &aad, "hello").unwrap();
+        // 元数据被篡改（remoteId 改了）→ 解密必须失败
+        let bad_aad = e2e_aad("dev-a", 43, 1_758_000_000_000, WIRE_TEXT);
+        assert!(e2e_decrypt(&key, &bad_aad, &data).is_none());
+    }
+
+    #[test]
+    fn e2e_malformed_data_fails() {
+        let key = e2e_key("group-secret", "g1");
+        let aad = e2e_aad("dev-a", 42, 1_758_000_000_000, WIRE_TEXT);
+        assert!(e2e_decrypt(&key, &aad, "not-base64!!!").is_none());
+        assert!(e2e_decrypt(&key, &aad, &B64.encode([0u8; 8])).is_none()); // 太短
+    }
+
+    #[test]
+    fn url_normalize() {
+        assert_eq!(normalize_url("1.2.3.4:8780"), "ws://1.2.3.4:8780/ws");
+        assert_eq!(normalize_url("ws://1.2.3.4:8780"), "ws://1.2.3.4:8780/ws");
+        assert_eq!(
+            normalize_url("wss://relay.example.com"),
+            "wss://relay.example.com/ws"
+        );
+        assert_eq!(
+            normalize_url("wss://relay.example.com/ws"),
+            "wss://relay.example.com/ws"
+        );
+        assert_eq!(normalize_url("  "), "");
+    }
 }

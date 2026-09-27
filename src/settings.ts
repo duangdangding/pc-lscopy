@@ -790,6 +790,7 @@ interface RelayStateDto {
   server_url: string;
   group_id: string;
   access_key: string;
+  group_key: string;
   status: string;
   peers: { device_id: string; name: string }[];
 }
@@ -798,6 +799,7 @@ const relayEnabledEl = $<HTMLInputElement>("#relay-enabled");
 const relayUrlEl = $<HTMLInputElement>("#relay-url");
 const relayGroupEl = $<HTMLInputElement>("#relay-group");
 const relayKeyEl = $<HTMLInputElement>("#relay-key");
+const relayGkeyEl = $<HTMLInputElement>("#relay-gkey");
 const relayStatusEl = $<HTMLSpanElement>("#relay-status");
 const relayPeersEl = $<HTMLDivElement>("#relay-peers");
 
@@ -811,6 +813,7 @@ const markRelayDirty = (el: HTMLInputElement, key: string) =>
 markRelayDirty(relayUrlEl, "url");
 markRelayDirty(relayGroupEl, "group");
 markRelayDirty(relayKeyEl, "key");
+markRelayDirty(relayGkeyEl, "gkey");
 
 function relayPatch(patch: Record<string, unknown>) {
   invoke("relay_update_settings", { patch }).catch((e) => alert(`设置失败: ${e}`));
@@ -824,6 +827,7 @@ $("#relay-save").addEventListener("click", () => {
     server_url: relayUrlEl.value,
     group_id: relayGroupEl.value,
     access_key: relayKeyEl.value,
+    group_key: relayGkeyEl.value,
   });
   relayDirty.clear();
 });
@@ -858,6 +862,8 @@ async function refreshRelayState() {
       relayGroupEl.value = s.group_id;
     if (!relayDirty.has("key") && (!relayLoaded || document.activeElement !== relayKeyEl))
       relayKeyEl.value = s.access_key;
+    if (!relayDirty.has("gkey") && (!relayLoaded || document.activeElement !== relayGkeyEl))
+      relayGkeyEl.value = s.group_key;
     relayStatusEl.textContent = s.status;
     renderRelayPeers(s.peers);
     relayLoaded = true;

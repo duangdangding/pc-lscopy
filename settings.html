@@ -264,12 +264,17 @@
             <span class="lan-inline">
               <input id="relay-key" type="password" placeholder="服务器 RELAY_ACCESS_KEYS 之一" style="width: 260px" />
             </span>
+
+            <span class="lan-label">分组密钥</span>
+            <span class="lan-inline">
+              <input id="relay-gkey" type="password" placeholder="可选：同组设备填相同密钥即启用端到端加密" style="width: 260px" />
+            </span>
           </div>
           <div class="row" style="margin-top: 10px">
             <button id="relay-save" class="btn">保存并连接</button>
             <span id="relay-status" class="desc" style="align-self: center">…</span>
           </div>
-          <p class="desc">密钥仅保存在本机配置文件中，通过挑战-响应鉴权，从不上线传输。地址、分组、密钥修改后自动重连。当前仅文本经中继同步，图片/文件仍走局域网。</p>
+          <p class="desc">接入密钥通过挑战-响应鉴权，从不上线传输。分组密钥仅存在各设备本地，填写后剪贴板内容以 AES-256-GCM 加密后才发出，中继服务器只能看到密文；同组设备必须填写完全相同的分组密钥，否则互相无法解密。当前仅文本经中继同步，图片/文件仍走局域网。</p>
         </section>
 
         <section class="card">
