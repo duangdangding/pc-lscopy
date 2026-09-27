@@ -85,7 +85,7 @@ LAN 侧现状如此（监听剪贴板 → 仅本地新条目入待同步集）�
   "ts": 1758..., "auth": "HMAC-SHA256(接入密钥, nonce+deviceId+ts)" }
 { "op": "push",   "clip": { "type": 1, "text": "...", "timestamp": 1758...,
                             "remoteDeviceId": "...", "remoteId": 123 } }
-{ "op": "pull",   "sinceMs": 1758... }        // 重连后补拉
+{ "op": "pull",   "sinceSeq": 456 }                 // 连接成功后补拉（游标为服务器分配的条目序号）
 { "op": "ping" }
 ```
 
@@ -93,20 +93,22 @@ LAN 侧现状如此（监听剪贴板 → 仅本地新条目入待同步集）�
 
 ```json
 { "op": "challenge", "nonce": "..." }          // 连接建立后第一个消息，hello 鉴权用
-{ "op": "clip",   "clip": { ...同 push 的 clip... } }
+{ "op": "clip",   "seq": 457, "clip": { ...同 push 的 clip... } }   // seq 为服务器分配的单调递增序号
 { "op": "peers",  "devices": [{ "deviceId": "...", "name": "...", "online": true }] }
-{ "op": "acked",  "remoteId": 123 }
+{ "op": "acked",  "remoteId": 123, "seq": 457 }                     // push 确认，seq 供发送方推进游标
 { "op": "error",  "code": "auth_failed" }      // 鉴权失败/超时后立即断开
 ```
 
-### 4.4 离线暂存与游标
+### 4.4 离线暂存与游标（M3 已实现）
 
-- 服务器对每条 `push` 暂存一份（按分组），TTL 建议 7 天，每组上限建议 5000 条，
+- 服务器对每条 `push` 暂存一份（SQLite，`data/relay-queue.db`，按分组隔离），
+  每条分配单调递增的 `seq`；TTL 7 天（按服务器接收时间），每组上限 5000 条，
   超限淘汰最旧。
-- 设备上线 `hello` 后带上本地游标 `sinceMs`（每设备持久化 `relay_last_sync_ms`），
-  服务器把暂存中 `timestamp > sinceMs` 的逐条推给该设备。
-- 游标语义与现有 `LanSettings.last_sync`（按设备记的毫秒游标）一致，只是 Relay 的
-  游标维度是「中继通道」而非单台设备。
+- 游标用 `seq` 而非时间戳（避免同毫秒并发漏拉）：设备连接成功（收到 welcome）后发
+  `pull {sinceSeq: last_seq}`，服务器把 `seq > sinceSeq` 的暂存条目逐条下发；
+  实时 `clip` 与 `acked` 都携带 `seq`，客户端内存中实时推进 `last_seq`，
+  断开时统一落盘（`relay.last_seq`）。
+- 补拉与实时推送撞车产生的重复，由客户端入库时内容哈希查重（§3.1）兜住。
 
 ### 4.5 鉴权（强制，握手第一步）
 
@@ -233,9 +235,9 @@ A、B 同局域网且都连着中继。A 复制文本 X：
 
 ## 8. 分阶段实施路线
 
-1. **M1 服务器骨架**：WSS 接入、分组、push 转发、`peers` 广播。无加密、无暂存。
-2. **M2 客户端 Relay 通道**：`relay.rs` + 配置 + 设置页标签，打通「文本双通道同步」。
-3. **M3 离线暂存 + 游标补拉**：服务器队列 + `pull`/`sinceMs`。
+1. ~~**M1 服务器骨架**：WSS 接入、分组、push 转发、`peers` 广播。无加密、无暂存。~~ ✅
+2. ~~**M2 客户端 Relay 通道**：`relay.rs` + 配置 + 设置页标签，打通「文本双通道同步」。~~ ✅
+3. ~~**M3 离线暂存 + 游标补拉**：服务器队列 + `pull`/`sinceSeq`。~~ ✅
 4. **M4 端到端加密**：分组密钥分发 + AES-GCM 包裹 clip 负载。
 5. **M5 体验完善**：设备卡合并、大文件策略、图片经中继（可选）、密钥轮换。
 

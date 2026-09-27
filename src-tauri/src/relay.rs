@@ -52,6 +52,8 @@ pub struct RelaySettings {
     pub group_id: String,
     /// 接入密钥（服务器 RELAY_ACCESS_KEYS 之一）
     pub access_key: String,
+    /// 补拉游标：服务器分配的条目序号，连接成功后 pull sinceSeq=last_seq
+    pub last_seq: i64,
 }
 
 /// 规范化服务器地址：补 ws:// 前缀与 /ws 路径
@@ -202,14 +204,36 @@ fn import_relay_clip(app: &AppHandle, clip: &Value) {
     }
 }
 
+/// 推进补拉游标（只前进不后退）；游标在内存中实时更新，落盘在连接断开时统一做
+fn advance_cursor(state: &AppState, seq: i64) {
+    if seq <= 0 {
+        return;
+    }
+    let mut s = state.relay.settings.lock().unwrap();
+    if seq > s.last_seq {
+        s.last_seq = seq;
+    }
+}
+
 fn handle_server_msg(app: &AppHandle, text: &str) {
     let Ok(v) = serde_json::from_str::<Value>(text) else {
         return;
     };
     match v.get("op").and_then(|o| o.as_str()) {
         Some("clip") => {
+            let state = app.state::<AppState>();
+            if let Some(seq) = v.get("seq").and_then(|s| s.as_i64()) {
+                advance_cursor(&state, seq);
+            }
             if let Some(clip) = v.get("clip") {
                 import_relay_clip(app, clip);
+            }
+        }
+        // acked 也携带 seq：自己 push 的条目同样推进游标，避免补拉时拉回自己的
+        Some("acked") => {
+            let state = app.state::<AppState>();
+            if let Some(seq) = v.get("seq").and_then(|s| s.as_i64()) {
+                advance_cursor(&state, seq);
             }
         }
         Some("peers") => {
@@ -342,10 +366,13 @@ async fn run_connection(app: &AppHandle, url: &str, group: &str, key: &str, my_g
         }
     }
 
-    // ---- 鉴权通过：登记出站队列，进入收发循环 ----
+    // ---- 鉴权通过：登记出站队列，补拉离线条目，进入收发循环 ----
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     *state.relay.tx.lock().unwrap() = Some(tx.clone());
     state.relay.set_status(app, "🟢 已连接");
+    // 补拉离线期间错过的条目（seq 游标，重复到达由内容哈希查重兜住）
+    let since = state.relay.settings.lock().unwrap().last_seq;
+    let _ = tx.send(json!({ "op": "pull", "sinceSeq": since }).to_string());
 
     let mut ping = tokio::time::interval(PING_INTERVAL);
     ping.tick().await; // 跳过第一次立即触发
@@ -389,6 +416,8 @@ async fn run_connection(app: &AppHandle, url: &str, group: &str, key: &str, my_g
     }
     drop(guard);
     *state.relay.peers.lock().unwrap() = Vec::new();
+    // 补拉游标落盘（内存中已实时推进，这里统一持久化一次）
+    let _ = crate::persist_config(&state);
     state.relay.set_status(app, "连接已断开");
 }
 

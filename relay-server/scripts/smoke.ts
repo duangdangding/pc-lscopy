@@ -1,4 +1,4 @@
-// relay-server M1 冒烟测试：鉴权拒绝 + 双客户端分组转发
+// relay-server 冒烟测试（M1 鉴权/转发 + M3 离线暂存补拉）
 // 用法：bun run scripts/smoke.ts [端口] [接入密钥]
 import { createHmac } from "node:crypto";
 
@@ -12,7 +12,8 @@ function check(name: string, cond: boolean) {
   if (!cond) failures++;
 }
 
-function openAuthed(deviceId: string, name: string): Promise<WebSocket> {
+// 连接并完成鉴权；pullSeq 提供时在 welcome 后自动发 pull 补拉
+function openAuthed(deviceId: string, name: string, pullSeq?: number): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(url);
     ws.onmessage = (e) => {
@@ -24,6 +25,9 @@ function openAuthed(deviceId: string, name: string): Promise<WebSocket> {
           .digest("hex");
         ws.send(JSON.stringify({ op: "hello", deviceId, name, group: "g1", ts, auth }));
       } else if (msg.op === "welcome") {
+        if (pullSeq !== undefined) {
+          ws.send(JSON.stringify({ op: "pull", sinceSeq: pullSeq }));
+        }
         resolve(ws);
       } else if (msg.op === "error") {
         reject(new Error(`auth error: ${msg.code}`));
@@ -33,15 +37,19 @@ function openAuthed(deviceId: string, name: string): Promise<WebSocket> {
   });
 }
 
-function nextMsg(ws: WebSocket, timeoutMs = 3000): Promise<any> {
+// 等待下一条指定 op 的消息（跳过 peers/pong 等其他消息）
+function waitOp(ws: WebSocket, op: string, timeoutMs = 3000): Promise<any> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("timeout waiting message")), timeoutMs);
-    const prev = ws.onmessage;
-    ws.onmessage = (e) => {
-      clearTimeout(timer);
-      ws.onmessage = prev;
-      resolve(JSON.parse(String(e.data)));
+    const timer = setTimeout(() => reject(new Error(`timeout waiting op=${op}`)), timeoutMs);
+    const handler = (e: MessageEvent) => {
+      const msg = JSON.parse(String(e.data));
+      if (msg.op === op) {
+        clearTimeout(timer);
+        ws.removeEventListener("message", handler);
+        resolve(msg);
+      }
     };
+    ws.addEventListener("message", handler);
   });
 }
 
@@ -66,40 +74,41 @@ function nextMsg(ws: WebSocket, timeoutMs = 3000): Promise<any> {
   check("错误密钥被拒绝（auth_failed）", result === "auth_failed");
 }
 
-// 2) 两台设备正确鉴权入网，A push → B 收到 clip
+// 2) A 入网时 B 不在线：push 的条目应被暂存，B 后上线 pull 能补到
 const a = await openAuthed("dev-a", "电脑A");
-const b = await openAuthed("dev-b", "手机B");
-
-// B 会先收到 peers（A/B 在组内），再收 clip；循环等到 clip 为止
-const clipPromise = (async () => {
-  for (let i = 0; i < 5; i++) {
-    const msg = await nextMsg(b);
-    if (msg.op === "clip") return msg;
-  }
-  throw new Error("未收到 clip");
-})();
-
 const clip = {
-  type: 1,
+  type: 0,
   text: "中继冒烟测试",
   timestamp: Date.now(),
   remoteDeviceId: "dev-a",
   remoteId: 42,
 };
+const ackPromise = waitOp(a, "acked");
 a.send(JSON.stringify({ op: "push", clip }));
+const ack = await ackPromise;
+check("A 收到 acked（remoteId=42）", ack.remoteId === 42);
+check("acked 携带服务器 seq", typeof ack.seq === "number" && ack.seq >= 1);
 
-const got = await clipPromise;
-check("B 收到 A 的 clip", got.clip?.text === "中继冒烟测试");
+// B 后上线并补拉 sinceSeq=0：应收到暂存的条目
+const b = await openAuthed("dev-b", "手机B", 0);
+const got = await waitOp(b, "clip");
+check("B 补拉到 A 离线期间 push 的 clip", got.clip?.text === "中继冒烟测试");
+check("补拉 clip 携带 seq", typeof got.seq === "number" && got.seq === ack.seq);
 check("来源设备保留（remoteDeviceId=dev-a）", got.clip?.remoteDeviceId === "dev-a");
 
-const ack = await nextMsg(a);
-check("A 收到 acked（remoteId=42）", ack.op === "acked" && ack.remoteId === 42);
+// 3) 实时转发：B 在线时 A 再 push，B 直接收到（不走补拉）
+const clip2 = { ...clip, text: "实时条目", remoteId: 43, timestamp: Date.now() };
+const livePromise = waitOp(b, "clip");
+const ack2Promise = waitOp(a, "acked");
+a.send(JSON.stringify({ op: "push", clip: clip2 }));
+const [live, ack2] = await Promise.all([livePromise, ack2Promise]);
+check("B 实时收到 A 的第二条 clip", live.clip?.text === "实时条目" && live.seq === ack2.seq);
 
-// 3) ping/pong
-const pongPromise = nextMsg(b);
+// 4) ping/pong
+const pongPromise = waitOp(b, "pong");
 b.send(JSON.stringify({ op: "ping" }));
-const pong = await pongPromise;
-check("ping/pong 心跳", pong.op === "pong");
+await pongPromise;
+check("ping/pong 心跳", true);
 
 a.close();
 b.close();

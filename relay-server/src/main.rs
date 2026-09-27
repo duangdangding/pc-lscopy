@@ -1,12 +1,14 @@
-//! lscopy 中继服务器（M1 骨架）
+//! lscopy 中继服务器（M3）
 //!
 //! 职责（对应 docs/relay-sync-design.md §4）：
 //! - WebSocket 接入（/ws），连接建立后**第一步强制鉴权**，不过即断开
 //! - 挑战-响应鉴权：服务器下发 nonce，客户端回 HMAC-SHA256(接入密钥, nonce+deviceId+ts)
 //! - 分组（room）内转发 push → clip，成员变化广播 peers
+//! - 离线暂存：push 的条目落 SQLite 队列（每条分配递增 seq），TTL 7 天、每组上限 5000；
+//!   客户端连接后发 pull {sinceSeq} 补拉错过的条目
 //! - 防爆破：按 IP 计失败次数，超限临时封禁；单 IP 并发连接数上限
 //!
-//! M1 暂不含：离线暂存 / pull 补拉（M3）、端到端加密（M4，服务器无需感知）。
+//! 暂不含：端到端加密（M4，服务器无需感知）。
 
 use std::{
     collections::HashMap,
@@ -47,6 +49,10 @@ const BAN_FAILS: u32 = 5;
 const BAN_DURATION: Duration = Duration::from_secs(10 * 60);
 /// 单 IP 默认并发连接上限
 const DEFAULT_MAX_CONN_PER_IP: usize = 20;
+/// 离线暂存：条目保留时长（7 天，按服务器接收时间计）
+const QUEUE_TTL_MS: i64 = 7 * 24 * 3600 * 1000;
+/// 离线暂存：每组最多保留条数，超限淘汰最旧
+const QUEUE_MAX_PER_GROUP: i64 = 5000;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -181,9 +187,75 @@ struct AppState {
     ip_conns: Mutex<HashMap<IpAddr, usize>>,
     /// 单 IP 鉴权失败计数与封禁状态
     ip_bans: Mutex<HashMap<IpAddr, BanInfo>>,
+    /// 离线暂存队列（SQLite，异步上下文用 tokio Mutex）
+    queue: Mutex<rusqlite::Connection>,
+}
+
+// ---------- 离线暂存队列 ----------
+
+fn open_queue(data_dir: &str) -> Result<rusqlite::Connection, String> {
+    std::fs::create_dir_all(data_dir).map_err(|e| format!("数据目录创建失败: {e}"))?;
+    let path = std::path::Path::new(data_dir).join("relay-queue.db");
+    let conn = rusqlite::Connection::open(&path).map_err(|e| format!("队列数据库打开失败: {e}"))?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS relay_queue (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            received_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_queue_group ON relay_queue(group_id, seq);",
+    )
+    .map_err(|e| format!("队列数据库初始化失败: {e}"))?;
+    Ok(conn)
 }
 
 impl AppState {
+    /// 暂存一条 clip 并返回分配的 seq；同时做 TTL / 条数淘汰
+    async fn queue_push(&self, group: &str, payload: &str) -> Option<i64> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        let conn = self.queue.lock().await;
+        conn.execute(
+            "INSERT INTO relay_queue(group_id, payload, received_at) VALUES(?1, ?2, ?3)",
+            rusqlite::params![group, payload, now],
+        )
+        .ok()?;
+        let seq = conn.last_insert_rowid();
+        // TTL 淘汰（全表，按接收时间）
+        let _ = conn.execute(
+            "DELETE FROM relay_queue WHERE received_at < ?1",
+            rusqlite::params![now - QUEUE_TTL_MS],
+        );
+        // 每组条数上限：保留最新 QUEUE_MAX_PER_GROUP 条
+        let _ = conn.execute(
+            "DELETE FROM relay_queue WHERE group_id = ?1 AND seq NOT IN (
+                SELECT seq FROM relay_queue WHERE group_id = ?1 ORDER BY seq DESC LIMIT ?2
+            )",
+            rusqlite::params![group, QUEUE_MAX_PER_GROUP],
+        );
+        Some(seq)
+    }
+
+    /// 补拉：取出分组内 seq > since 的全部暂存条目（升序）
+    async fn queue_pull(&self, group: &str, since: i64) -> Vec<(i64, String)> {
+        let conn = self.queue.lock().await;
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT seq, payload FROM relay_queue WHERE group_id = ?1 AND seq > ?2 ORDER BY seq ASC",
+        ) else {
+            return Vec::new();
+        };
+        let rows = stmt.query_map(rusqlite::params![group, since], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        });
+        match rows {
+            Ok(m) => m.filter_map(|r| r.ok()).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
     /// 连接前检查：被封禁则拒绝
     async fn is_banned(&self, ip: &IpAddr) -> bool {
         let bans = self.ip_bans.lock().await;
@@ -459,14 +531,22 @@ async fn handle_conn(socket: WebSocket, ip: IpAddr, state: Arc<AppState>) {
             Err(_) => continue,
         };
         match v.get("op").and_then(|o| o.as_str()) {
-            // 剪贴板条目：原样转发给分组内其他成员
+            // 剪贴板条目：暂存（分配 seq）后转发给分组内其他成员，ack 携带 seq 供发送方推进游标
             Some("push") => {
                 if let Some(clip) = v.get("clip") {
-                    let out = json!({ "op": "clip", "clip": clip }).to_string();
+                    let payload = clip.to_string();
+                    let Some(seq) = state.queue_push(&group, &payload).await else {
+                        let _ = tx.send(
+                            json!({ "op": "error", "code": "queue_error" }).to_string(),
+                        );
+                        continue;
+                    };
+                    let out = json!({ "op": "clip", "seq": seq, "clip": clip }).to_string();
                     state.broadcast(&group, Some(&device_id), &out).await;
                     let ack = json!({
                         "op": "acked",
                         "remoteId": clip.get("remoteId").cloned().unwrap_or(Value::Null),
+                        "seq": seq,
                     })
                     .to_string();
                     let _ = tx.send(ack);
@@ -475,12 +555,25 @@ async fn handle_conn(socket: WebSocket, ip: IpAddr, state: Arc<AppState>) {
             Some("ping") => {
                 let _ = tx.send(json!({ "op": "pong", "ts": now_ms() }).to_string());
             }
-            // M3 才支持离线补拉，M1 明确答复未实现
+            // 离线补拉：把分组内 seq > sinceSeq 的暂存条目逐条下发
+            // （与实时推送撞车产生的重复由客户端内容哈希查重兜住）
             Some("pull") => {
-                let _ = tx.send(
-                    json!({ "op": "error", "code": "not_implemented", "what": "pull(M3)" })
-                        .to_string(),
-                );
+                let since = v.get("sinceSeq").and_then(|s| s.as_i64()).unwrap_or(0);
+                let backlog = state.queue_pull(&group, since).await;
+                if !backlog.is_empty() {
+                    log(&format!("设备 {device_id} 补拉 {} 条（sinceSeq={since}）", backlog.len()));
+                }
+                for (seq, payload) in backlog {
+                    let Ok(clip) = serde_json::from_str::<Value>(&payload) else {
+                        continue;
+                    };
+                    if tx
+                        .send(json!({ "op": "clip", "seq": seq, "clip": clip }).to_string())
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
             }
             _ => {}
         }
@@ -523,11 +616,20 @@ async fn main() {
         cfg.data_dir
     ));
 
+    let queue = match open_queue(&cfg.data_dir) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+
     let state = Arc::new(AppState {
         cfg,
         rooms: RwLock::new(HashMap::new()),
         ip_conns: Mutex::new(HashMap::new()),
         ip_bans: Mutex::new(HashMap::new()),
+        queue: Mutex::new(queue),
     });
 
     let app = Router::new()
