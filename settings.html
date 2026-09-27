@@ -270,16 +270,12 @@
               <input id="relay-gkey" type="password" placeholder="可选：同组设备填相同密钥即启用端到端加密" style="width: 260px" />
             </span>
           </div>
+          <label class="check" style="margin-top: 8px"><input id="relay-image" type="checkbox" /> 图片也经中继同步（≤4MB，默认关闭以省服务器流量）</label>
           <div class="row" style="margin-top: 10px">
             <button id="relay-save" class="btn">保存并连接</button>
             <span id="relay-status" class="desc" style="align-self: center">…</span>
           </div>
-          <p class="desc">接入密钥通过挑战-响应鉴权，从不上线传输。分组密钥仅存在各设备本地，填写后剪贴板内容以 AES-256-GCM 加密后才发出，中继服务器只能看到密文；同组设备必须填写完全相同的分组密钥，否则互相无法解密。当前仅文本经中继同步，图片/文件仍走局域网。</p>
-        </section>
-
-        <section class="card">
-          <h2>在线设备（经中继）</h2>
-          <div id="relay-peers" class="lan-list"><p class="desc">未连接。</p></div>
+          <p class="desc">接入密钥通过挑战-响应鉴权，从不上线传输。分组密钥仅存在各设备本地，填写后剪贴板内容以 AES-256-GCM 加密后才发出，中继服务器只能看到密文；同组设备必须填写完全相同的分组密钥，否则互相无法解密。文件类仍仅走局域网；在线设备并入上方设备列表（带「云端」徽标）。</p>
         </section>
       </div>
 

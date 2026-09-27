@@ -1029,10 +1029,17 @@ fn start_watcher(app: AppHandle) {
             if changed {
                 prune(&db, max_items);
                 let _ = app.emit("clip-added", ());
-                // 云端中继：仅文本走中继（图片/文件仅局域网，见 docs/relay-sync-design.md §7.3）
-                if let Cand::Text(text, h) = &cand {
-                    drop(db);
-                    relay::push_local_text(&state, text, *h);
+                // 云端中继：文本默认走中继；图片需开「图片经中继」开关（设计文档 §7.3）
+                match &cand {
+                    Cand::Text(text, h) => {
+                        drop(db);
+                        relay::push_local_text(&state, text, *h);
+                    }
+                    Cand::Image(png, w, hgt, h) => {
+                        drop(db);
+                        relay::push_local_image(&state, png, *w, *hgt, *h);
+                    }
+                    Cand::File(..) => {}
                 }
             }
         }

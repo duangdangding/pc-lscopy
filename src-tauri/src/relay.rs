@@ -42,6 +42,9 @@ const RECONNECT_MIN: Duration = Duration::from_secs(3);
 const RECONNECT_MAX: Duration = Duration::from_secs(60);
 /// 线上记录类型（与 lan.rs / 安卓端一致）
 const WIRE_TEXT: i64 = 0;
+const WIRE_IMAGE: i64 = 1;
+/// 经中继同步的图片 PNG 上限（超出只走局域网）
+const MAX_RELAY_IMAGE: usize = 4 * 1024 * 1024;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -60,6 +63,8 @@ pub struct RelaySettings {
     pub access_key: String,
     /// 分组密钥（可选）：填写后启用端到端加密，同组设备需一致；服务器只见到密文
     pub group_key: String,
+    /// 图片也经中继同步（默认关，省服务器流量；仅 ≤4MB 的 PNG）
+    pub sync_image: bool,
     /// 补拉游标：服务器分配的条目序号，连接成功后 pull sinceSeq=last_seq
     pub last_seq: i64,
 }
@@ -84,18 +89,12 @@ fn e2e_aad(device_id: &str, remote_id: i64, timestamp_ms: i64, wire_type: i64) -
     format!("{device_id}:{remote_id}:{timestamp_ms}:{wire_type}").into_bytes()
 }
 
-/// 加密文本 → base64(nonce ‖ ciphertext)
-fn e2e_encrypt(key: &[u8; 32], aad: &[u8], plain: &str) -> Option<String> {
+/// 加密内容 → base64(nonce ‖ ciphertext)
+fn e2e_encrypt_bytes(key: &[u8; 32], aad: &[u8], msg: &[u8]) -> Option<String> {
     let cipher = Aes256Gcm::new_from_slice(key).ok()?;
     let nonce = rand::random::<[u8; 12]>();
     let ct = cipher
-        .encrypt(
-            Nonce::from_slice(&nonce),
-            Payload {
-                msg: plain.as_bytes(),
-                aad,
-            },
-        )
+        .encrypt(Nonce::from_slice(&nonce), Payload { msg, aad })
         .ok()?;
     let mut buf = Vec::with_capacity(12 + ct.len());
     buf.extend_from_slice(&nonce);
@@ -103,14 +102,14 @@ fn e2e_encrypt(key: &[u8; 32], aad: &[u8], plain: &str) -> Option<String> {
     Some(B64.encode(buf))
 }
 
-/// 解密 base64(nonce ‖ ciphertext) → 文本；密钥不对/AAD 被篡改/格式损坏都返回 None
-fn e2e_decrypt(key: &[u8; 32], aad: &[u8], data: &str) -> Option<String> {
+/// 解密 base64(nonce ‖ ciphertext) → 原始字节；密钥不对/AAD 被篡改/格式损坏都返回 None
+fn e2e_decrypt_bytes(key: &[u8; 32], aad: &[u8], data: &str) -> Option<Vec<u8>> {
     let buf = B64.decode(data.trim()).ok()?;
     if buf.len() <= 12 {
         return None;
     }
     let cipher = Aes256Gcm::new_from_slice(key).ok()?;
-    let pt = cipher
+    cipher
         .decrypt(
             Nonce::from_slice(&buf[..12]),
             Payload {
@@ -118,8 +117,7 @@ fn e2e_decrypt(key: &[u8; 32], aad: &[u8], data: &str) -> Option<String> {
                 aad,
             },
         )
-        .ok()?;
-    String::from_utf8(pt).ok()
+        .ok()
 }
 
 /// 规范化服务器地址：补 ws:// 前缀与 /ws 路径
@@ -144,8 +142,8 @@ fn normalize_url(raw: &str) -> String {
 
 #[derive(Serialize, Clone)]
 pub struct PeerDto {
-    device_id: String,
-    name: String,
+    pub(crate) device_id: String,
+    pub(crate) name: String,
 }
 
 pub struct RelayShared {
@@ -179,6 +177,11 @@ impl RelayShared {
         *cur = s.to_string();
         drop(cur);
         let _ = app.emit("relay-state-changed", ());
+    }
+
+    /// 当前中继在线的分组设备名单（LAN 模块合并设备卡用）
+    pub(crate) fn peers_pub(&self) -> Vec<PeerDto> {
+        self.peers.lock().unwrap().clone()
     }
 }
 
@@ -219,7 +222,7 @@ pub fn push_local_text(state: &AppState, text: &str, hash: u64) {
     } else {
         let key = e2e_key(&group_key, &group_id);
         let aad = e2e_aad(&my_id, id, timestamp_ms, WIRE_TEXT);
-        let Some(data) = e2e_encrypt(&key, &aad, text) else {
+        let Some(data) = e2e_encrypt_bytes(&key, &aad, text.as_bytes()) else {
             return; // 加密失败静默丢弃（不降级发明文，避免用户误以为已加密）
         };
         json!({
@@ -235,17 +238,72 @@ pub fn push_local_text(state: &AppState, text: &str, hash: u64) {
     let _ = tx.send(msg);
 }
 
+/// 本机新图片剪贴板入库后调用：仅在「图片经中继」开关开启且 ≤4MB 时 push（M5）
+pub fn push_local_image(state: &AppState, png: &[u8], width: u32, height: u32, hash: u64) {
+    let tx = state.relay.tx.lock().unwrap().clone();
+    let Some(tx) = tx else { return };
+    let (enabled, sync_image, group_id, group_key) = {
+        let s = state.relay.settings.lock().unwrap();
+        (s.enabled, s.sync_image, s.group_id.clone(), s.group_key.clone())
+    };
+    if !enabled || !sync_image || png.len() > MAX_RELAY_IMAGE {
+        return;
+    }
+    let my_id = state.lan.settings.lock().unwrap().device_id.clone();
+    let (id, created_at) = {
+        let db = state.db.lock().unwrap();
+        db.query_row(
+            "SELECT id, created_at FROM clips WHERE hash = ?1 ORDER BY created_at DESC LIMIT 1",
+            rusqlite::params![hash as i64],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+        )
+        .unwrap_or((0, now_secs()))
+    };
+    let timestamp_ms = created_at * 1000;
+    // 与文本同一加密口径：分组密钥非空时只发密文
+    let clip = if group_key.is_empty() {
+        json!({
+            "type": WIRE_IMAGE,
+            "data": B64.encode(png),
+            "width": width,
+            "height": height,
+            "timestamp": timestamp_ms,
+            "remoteDeviceId": my_id,
+            "remoteId": id,
+        })
+    } else {
+        let key = e2e_key(&group_key, &group_id);
+        let aad = e2e_aad(&my_id, id, timestamp_ms, WIRE_IMAGE);
+        let Some(data) = e2e_encrypt_bytes(&key, &aad, png) else {
+            return;
+        };
+        json!({
+            "type": WIRE_IMAGE,
+            "enc": 1,
+            "data": data,
+            "width": width,
+            "height": height,
+            "timestamp": timestamp_ms,
+            "remoteDeviceId": my_id,
+            "remoteId": id,
+        })
+    };
+    let msg = json!({ "op": "push", "clip": clip }).to_string();
+    let _ = tx.send(msg);
+}
+
 // ---------- 接收链路（中继 → 入库） ----------
 
-/// 处理服务器推来的 clip：环回防护 + 仅文本 + （必要时解密）+ 复用内容哈希查重入库
+/// 处理服务器推来的 clip：环回防护 + 类型开关 + （必要时解密）+ 复用内容哈希查重入库
 fn import_relay_clip(app: &AppHandle, clip: &Value) {
     let state = app.state::<AppState>();
-    let (my_id, allow_text, group_id, group_key) = {
+    let (my_id, allow_text, allow_image, group_id, group_key) = {
         let lan = state.lan.settings.lock().unwrap();
         let relay = state.relay.settings.lock().unwrap();
         (
             lan.device_id.clone(),
             lan.sync_text,
+            relay.sync_image,
             relay.group_id.clone(),
             relay.group_key.clone(),
         )
@@ -255,64 +313,83 @@ fn import_relay_clip(app: &AppHandle, clip: &Value) {
     if origin == Some(my_id.as_str()) {
         return;
     }
-    // M2 仅同步文本（图片/文件仅局域网，见设计文档 §7.3）
-    let wire_type = clip.get("type").and_then(|v| v.as_i64());
-    if wire_type != Some(WIRE_TEXT) {
+    let Some(wire_type) = clip.get("type").and_then(|v| v.as_i64()) else {
         return;
+    };
+    match wire_type {
+        WIRE_TEXT if allow_text => {}
+        WIRE_IMAGE if allow_image => {}
+        _ => return, // 文件/视频/音频仅局域网（设计文档 §7.3）
     }
-    if !allow_text {
-        return;
-    }
-    let created_at = clip
-        .get("timestamp")
-        .and_then(|v| v.as_i64())
-        .map(|ms| (ms / 1000).max(0))
-        .unwrap_or_else(now_secs);
     let timestamp_ms = clip.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0);
+    let created_at = if timestamp_ms > 0 {
+        (timestamp_ms / 1000).max(0)
+    } else {
+        now_secs()
+    };
     let remote_id = clip.get("remoteId").and_then(|v| v.as_i64());
 
-    // 密文条目：本机未配分组密钥则无法解密，跳过
-    let text: String = if clip.get("enc").and_then(|v| v.as_i64()) == Some(1) {
+    // 取出内容字节：密文先解密（未配分组密钥或校验失败则跳过）
+    let content: Vec<u8> = if clip.get("enc").and_then(|v| v.as_i64()) == Some(1) {
         if group_key.is_empty() {
             return;
         }
         let Some(data) = clip.get("data").and_then(|v| v.as_str()) else {
             return;
         };
-        let aad = e2e_aad(
-            origin.unwrap_or_default(),
-            remote_id.unwrap_or(0),
-            timestamp_ms,
-            wire_type.unwrap_or(0),
-        );
-        match e2e_decrypt(&e2e_key(&group_key, &group_id), &aad, data) {
-            Some(t) => t,
+        let aad = e2e_aad(origin.unwrap_or_default(), remote_id.unwrap_or(0), timestamp_ms, wire_type);
+        match e2e_decrypt_bytes(&e2e_key(&group_key, &group_id), &aad, data) {
+            Some(b) => b,
             None => return, // 密钥不一致或数据被篡改
         }
-    } else {
+    } else if wire_type == WIRE_TEXT {
         match clip.get("text").and_then(|v| v.as_str()) {
-            Some(t) => t.to_string(),
+            Some(t) if !t.is_empty() => t.as_bytes().to_vec(),
+            _ => return,
+        }
+    } else {
+        match clip.get("data").and_then(|v| v.as_str()) {
+            Some(d) => match B64.decode(d) {
+                Ok(b) if !b.is_empty() && b.len() <= MAX_RELAY_IMAGE => b,
+                _ => return,
+            },
             None => return,
         }
     };
-    if text.is_empty() {
-        return;
-    }
-    let h = hash_bytes(text.as_bytes());
+
+    let h = hash_bytes(&content);
     let inserted = {
         let db = state.db.lock().unwrap();
-        crate::lan::store_remote(
-            &db,
-            "text",
-            Some(&text),
-            None,
-            None,
-            None,
-            h,
-            created_at,
-            origin,
-            remote_id,
-        )
+        if wire_type == WIRE_TEXT {
+            let Ok(text) = String::from_utf8(content) else { return };
+            crate::lan::store_remote(
+                &db,
+                "text",
+                Some(&text),
+                None,
+                None,
+                None,
+                h,
+                created_at,
+                origin,
+                remote_id,
+            )
+        } else {
+            let w = clip.get("width").and_then(|v| v.as_u64()).map(|v| v as u32);
+            let hgt = clip.get("height").and_then(|v| v.as_u64()).map(|v| v as u32);
+            crate::lan::store_remote(
+                &db,
+                "image",
+                None,
+                Some(&content),
+                w,
+                hgt,
+                h,
+                created_at,
+                origin,
+                remote_id,
+            )
+        }
     };
     if inserted {
         let _ = app.emit("clip-added", ());
@@ -593,6 +670,7 @@ pub struct RelayStateDto {
     group_id: String,
     access_key: String,
     group_key: String,
+    sync_image: bool,
     status: String,
     peers: Vec<PeerDto>,
 }
@@ -606,6 +684,7 @@ pub fn relay_get_state(state: State<AppState>) -> RelayStateDto {
         group_id: s.group_id,
         access_key: s.access_key,
         group_key: s.group_key,
+        sync_image: s.sync_image,
         status: state.relay.status.lock().unwrap().clone(),
         peers: state.relay.peers.lock().unwrap().clone(),
     }
@@ -618,6 +697,7 @@ pub struct RelaySettingsPatch {
     group_id: Option<String>,
     access_key: Option<String>,
     group_key: Option<String>,
+    sync_image: Option<bool>,
 }
 
 #[tauri::command]
@@ -643,6 +723,9 @@ pub fn relay_update_settings(
         if let Some(v) = patch.group_key {
             s.group_key = v.trim().to_string();
         }
+        if let Some(v) = patch.sync_image {
+            s.sync_image = v;
+        }
     }
     // 代际 +1：连接循环感知后自动重连
     state.relay.gen.fetch_add(1, Ordering::SeqCst);
@@ -662,38 +745,38 @@ mod tests {
     fn e2e_roundtrip() {
         let key = e2e_key("group-secret", "g1");
         let aad = e2e_aad("dev-a", 42, 1_758_000_000_000, WIRE_TEXT);
-        let data = e2e_encrypt(&key, &aad, "机密文本 abc 123").unwrap();
-        let back = e2e_decrypt(&key, &aad, &data).unwrap();
-        assert_eq!(back, "机密文本 abc 123");
+        let data = e2e_encrypt_bytes(&key, &aad, "机密文本 abc 123".as_bytes()).unwrap();
+        let back = e2e_decrypt_bytes(&key, &aad, &data).unwrap();
+        assert_eq!(String::from_utf8(back).unwrap(), "机密文本 abc 123");
     }
 
     #[test]
     fn e2e_wrong_key_or_group_fails() {
         let key = e2e_key("group-secret", "g1");
         let aad = e2e_aad("dev-a", 42, 1_758_000_000_000, WIRE_TEXT);
-        let data = e2e_encrypt(&key, &aad, "hello").unwrap();
+        let data = e2e_encrypt_bytes(&key, &aad, b"hello").unwrap();
         // 密钥不同
-        assert!(e2e_decrypt(&e2e_key("other-secret", "g1"), &aad, &data).is_none());
+        assert!(e2e_decrypt_bytes(&e2e_key("other-secret", "g1"), &aad, &data).is_none());
         // 分组不同（派生密钥不同）
-        assert!(e2e_decrypt(&e2e_key("group-secret", "g2"), &aad, &data).is_none());
+        assert!(e2e_decrypt_bytes(&e2e_key("group-secret", "g2"), &aad, &data).is_none());
     }
 
     #[test]
     fn e2e_tampered_aad_fails() {
         let key = e2e_key("group-secret", "g1");
         let aad = e2e_aad("dev-a", 42, 1_758_000_000_000, WIRE_TEXT);
-        let data = e2e_encrypt(&key, &aad, "hello").unwrap();
+        let data = e2e_encrypt_bytes(&key, &aad, b"hello").unwrap();
         // 元数据被篡改（remoteId 改了）→ 解密必须失败
         let bad_aad = e2e_aad("dev-a", 43, 1_758_000_000_000, WIRE_TEXT);
-        assert!(e2e_decrypt(&key, &bad_aad, &data).is_none());
+        assert!(e2e_decrypt_bytes(&key, &bad_aad, &data).is_none());
     }
 
     #[test]
     fn e2e_malformed_data_fails() {
         let key = e2e_key("group-secret", "g1");
         let aad = e2e_aad("dev-a", 42, 1_758_000_000_000, WIRE_TEXT);
-        assert!(e2e_decrypt(&key, &aad, "not-base64!!!").is_none());
-        assert!(e2e_decrypt(&key, &aad, &B64.encode([0u8; 8])).is_none()); // 太短
+        assert!(e2e_decrypt_bytes(&key, &aad, "not-base64!!!").is_none());
+        assert!(e2e_decrypt_bytes(&key, &aad, &B64.encode([0u8; 8])).is_none()); // 太短
     }
 
     #[test]

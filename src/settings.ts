@@ -219,6 +219,7 @@ interface LanDeviceDto {
   online: boolean;
   last_sync: number; // 毫秒
   syncing: boolean;
+  via: string; // "" 离线 | "lan" | "relay" | "lan+relay"
 }
 
 interface LanStateDto {
@@ -627,6 +628,13 @@ function renderLanDevices(devices: LanDeviceDto[]) {
       pb.textContent = "已配对";
       title.appendChild(pb);
     }
+    // 通道徽标：中继参与的设备标注（LAN 优先显示；纯局域网设备不标注）
+    if (d.via === "lan+relay" || d.via === "relay") {
+      const vb = document.createElement("span");
+      vb.className = "lan-badge";
+      vb.textContent = d.via === "lan+relay" ? "局域网+云端" : "云端";
+      title.appendChild(vb);
+    }
     const sub = document.createElement("div");
     sub.className = "lan-sub";
     sub.textContent =
@@ -634,6 +642,13 @@ function renderLanDevices(devices: LanDeviceDto[]) {
         .filter(Boolean)
         .join(" · ") + (d.last_sync ? ` · 上次同步 ${fmtTime(d.last_sync)}` : "");
     meta.append(title, sub);
+
+    // 仅云端可达的设备（未局域网配对）：不显示配对/同步/拉黑等局域网操作
+    if (!d.paired && d.via === "relay") {
+      row.append(dot, meta);
+      lanDevicesEl.appendChild(row);
+      continue;
+    }
 
     const actions = document.createElement("div");
     actions.className = "lan-actions";
@@ -791,6 +806,7 @@ interface RelayStateDto {
   group_id: string;
   access_key: string;
   group_key: string;
+  sync_image: boolean;
   status: string;
   peers: { device_id: string; name: string }[];
 }
@@ -800,8 +816,8 @@ const relayUrlEl = $<HTMLInputElement>("#relay-url");
 const relayGroupEl = $<HTMLInputElement>("#relay-group");
 const relayKeyEl = $<HTMLInputElement>("#relay-key");
 const relayGkeyEl = $<HTMLInputElement>("#relay-gkey");
+const relayImageEl = $<HTMLInputElement>("#relay-image");
 const relayStatusEl = $<HTMLSpanElement>("#relay-status");
-const relayPeersEl = $<HTMLDivElement>("#relay-peers");
 
 let relayTimer: number | undefined;
 let relayLoaded = false;
@@ -821,6 +837,7 @@ function relayPatch(patch: Record<string, unknown>) {
 
 // 开关即时生效；地址/分组/密钥走「保存并连接」一次提交
 relayEnabledEl.onchange = () => relayPatch({ enabled: relayEnabledEl.checked });
+relayImageEl.onchange = () => relayPatch({ sync_image: relayImageEl.checked });
 
 $("#relay-save").addEventListener("click", () => {
   relayPatch({
@@ -832,29 +849,11 @@ $("#relay-save").addEventListener("click", () => {
   relayDirty.clear();
 });
 
-function renderRelayPeers(peers: { device_id: string; name: string }[]) {
-  relayPeersEl.innerHTML = "";
-  if (!peers.length) {
-    relayPeersEl.innerHTML = '<p class="desc">分组内暂无其他在线设备。</p>';
-    return;
-  }
-  for (const p of peers) {
-    const row = document.createElement("div");
-    row.className = "lan-device";
-    const dot = document.createElement("span");
-    dot.className = "lan-dot online";
-    const meta = document.createElement("div");
-    meta.className = "lan-meta";
-    meta.textContent = p.name || p.device_id;
-    row.append(dot, meta);
-    relayPeersEl.appendChild(row);
-  }
-}
-
 async function refreshRelayState() {
   try {
     const s = await invoke<RelayStateDto>("relay_get_state");
     relayEnabledEl.checked = s.enabled;
+    relayImageEl.checked = s.sync_image;
     // 用户碰过的输入框（未保存）一律不覆盖；首次加载或未被编辑时才回填
     if (!relayDirty.has("url") && (!relayLoaded || document.activeElement !== relayUrlEl))
       relayUrlEl.value = s.server_url;
@@ -865,7 +864,6 @@ async function refreshRelayState() {
     if (!relayDirty.has("gkey") && (!relayLoaded || document.activeElement !== relayGkeyEl))
       relayGkeyEl.value = s.group_key;
     relayStatusEl.textContent = s.status;
-    renderRelayPeers(s.peers);
     relayLoaded = true;
   } catch {
     /* 后端未就绪时静默 */

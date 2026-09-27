@@ -2154,6 +2154,8 @@ pub struct DeviceDto {
     online: bool,
     last_sync: i64,
     syncing: bool,
+    /// 可达通道："" 离线 | "lan" | "relay" | "lan+relay"（双通道合并展示用）
+    via: String,
 }
 
 #[derive(Serialize)]
@@ -2197,10 +2199,12 @@ pub struct LanStateDto {
 fn build_state_dto(state: &AppState) -> LanStateDto {
     let s = state.lan.settings.lock().unwrap().clone();
     let syncing = state.lan.syncing.lock().unwrap().clone();
-    let devices = merged_devices(state)
+    let mut devices: Vec<DeviceDto> = merged_devices(state)
         .into_iter()
         .map(|(d, online, last_sync)| DeviceDto {
             syncing: syncing.contains(&d.device_id),
+            via: if online { "lan".to_string() } else { String::new() },
+            online,
             device_id: d.device_id,
             name: d.name,
             model: d.model,
@@ -2208,10 +2212,36 @@ fn build_state_dto(state: &AppState) -> LanStateDto {
             port: d.port,
             sharing: d.sharing,
             paired: d.paired,
-            online,
             last_sync,
         })
         .collect();
+    // 双通道合并（设计文档 §7.4）：中继在线设备按 device_id 并入设备卡，LAN 优先；
+    // 局域网看不到但中继在线的设备，新增一张「云端」卡
+    let relay_peers = state.relay.peers_pub();
+    for p in relay_peers {
+        if let Some(d) = devices.iter_mut().find(|d| d.device_id == p.device_id) {
+            d.via = if d.via.is_empty() {
+                "relay".to_string()
+            } else {
+                format!("{}+relay", d.via)
+            };
+            d.online = true; // 云端可达即视为在线
+        } else {
+            devices.push(DeviceDto {
+                device_id: p.device_id,
+                name: p.name,
+                model: None,
+                host: None,
+                port: 0,
+                sharing: false,
+                paired: false,
+                online: true,
+                last_sync: 0,
+                syncing: false,
+                via: "relay".to_string(),
+            });
+        }
+    }
     let blocked = s
         .blocked
         .iter()
