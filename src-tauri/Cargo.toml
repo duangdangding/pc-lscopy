@@ -36,6 +36,12 @@ enigo = "0.2"
 if-addrs = "0.14"
 ureq = "2"
 sha2 = "0.10"
+# 云端中继客户端（relay.rs）：WebSocket + HMAC 鉴权
+tokio = { version = "1", features = ["time", "sync", "macros"] }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
+futures-util = "0.3"
+hmac = "0.12"
+hex = "0.4"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"

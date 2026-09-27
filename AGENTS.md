@@ -51,7 +51,13 @@ src-tauri/
   src/lan/transfer.rs  局域网互传文件：POST /recv 接收端（流式落盘、手动/
                     自动确认）、发送端（免配对、IP 直发、配对时加密）、
                     transfers 表传输记录
+  src/relay.rs      云端中继客户端（M2）：WSS 长连接、挑战-响应 HMAC 鉴权、
+                    本机文本 push、收到 clip 复用 lan::store_remote 入库、
+                    指数退避重连、配置代际变更自动重连
   src/main.rs       入口（仅调用 lib）
+relay-server/       自建中继服务器（独立 Rust 工程）：WSS 接入、强制鉴权、
+                    分组转发、Dockerfile / GHCR 镜像发布 workflow
+docs/relay-sync-design.md  中继 + 局域网双通道同步设计文档
   capabilities/     Tauri 权限声明（windows 列表需包含新增窗口 label）
   tauri.conf.json   窗口/打包配置（identifier: com.lsh.lscopy）
 vite.config.ts      多页面构建配置（index + settings + blocked + transfer）
@@ -126,10 +132,10 @@ cargo clippy           # lint
 - **构建必须走 Tauri CLI**（`bun run tauri build` / `tauri dev`），不要裸 `cargo build --release`：CLI 会开启 `custom-protocol` 特性并正确处理前端资源协议，裸 cargo 构建的 exe 会显示"无法访问页面"。
 - Windows 为主要目标平台；`winreg` 仅 Windows 编译（`cfg(windows)`）。
 - 剪贴板图片读取有 Windows 原生兜底逻辑（CF_BITMAP/CF_DIB），改动相关代码时注意不要回归截图软件兼容性。
-- 配置统一保存在 `lscopy-config.json`（顶层 `app` + `lan` 两键），默认在 **exe 同目录**（便携模式）；
+- 配置统一保存在 `lscopy-config.json`（顶层 `app` + `lan` + `relay` 三键），默认在 **exe 同目录**（便携模式）；
   实际目录由 exe 同目录的指针文件 `lscopy-config-dir.txt` 决定（设置页「配置文件」可自定义，
   改动时询问是否迁移旧文件）。数据库 `lscopy.db` 默认也在 exe 同目录；旧版系统配置目录
-  （`%APPDATA%`）的配置会在首次启动时自动迁移。落盘统一走 `persist_config`（锁顺序固定 config → lan.settings → config_file）。
+  （`%APPDATA%`）的配置会在首次启动时自动迁移。落盘统一走 `persist_config`（锁顺序固定 config → lan.settings → relay.settings → config_file）。
 - 主窗口失焦自动隐藏是**延迟 150ms 复查**实现的（拖动/缩放会造成瞬时失焦）；改动窗口事件逻辑时注意 `dragging` / `panel_pinned` / `main_focused` 三个状态。
 - 版本号需同步修改 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 三处（`Cargo.lock` 随构建自动更新）。
 - **应用内更新（Tauri updater）**：`tauri.conf.json` 已开启 `createUpdaterArtifacts` 并配置 pubkey/endpoints，

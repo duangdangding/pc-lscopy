@@ -36,10 +36,13 @@ document.querySelectorAll<HTMLButtonElement>(".tabs .tab").forEach((tab) => {
     tab.classList.add("active");
     const panel = $(`#tab-${tab.dataset.tab}`);
     panel.hidden = false;
-    if (tab.dataset.tab === "database") refreshDbInfo();
+    if (tab.dataset.tab === "data") refreshDbInfo();
     if (tab.dataset.tab === "about") initAboutTab();
-    setLanPolling(tab.dataset.tab === "sync");
-    // 局域网同步页的所有设置即时生效，隐藏底部「保存设置」栏；关于页也不需要
+    // 「设备同步」页同时包含局域网与中继两块，两个轮询都开
+    const onSync = tab.dataset.tab === "sync";
+    setLanPolling(onSync);
+    setRelayPolling(onSync);
+    // 设备同步页的所有设置即时生效，隐藏底部「保存设置」栏；关于页也不需要
     document.querySelector<HTMLElement>(".settings-footer")!.hidden =
       tab.dataset.tab === "sync" || tab.dataset.tab === "about";
   };
@@ -779,6 +782,102 @@ listen<{ device_id: string; name: string; model: string | null; host: string | n
 
 listen("lan-state-changed", () => {
   if (lanTimer !== undefined) refreshLanState();
+});
+
+// ---------- 云端中继 ----------
+interface RelayStateDto {
+  enabled: boolean;
+  server_url: string;
+  group_id: string;
+  access_key: string;
+  status: string;
+  peers: { device_id: string; name: string }[];
+}
+
+const relayEnabledEl = $<HTMLInputElement>("#relay-enabled");
+const relayUrlEl = $<HTMLInputElement>("#relay-url");
+const relayGroupEl = $<HTMLInputElement>("#relay-group");
+const relayKeyEl = $<HTMLInputElement>("#relay-key");
+const relayStatusEl = $<HTMLSpanElement>("#relay-status");
+const relayPeersEl = $<HTMLDivElement>("#relay-peers");
+
+let relayTimer: number | undefined;
+let relayLoaded = false;
+// 用户正在编辑/编辑过未保存的字段：轮询一律不覆盖（比 activeElement 更可靠，
+// 覆盖 IME 组合、窗口失焦后 activeElement 漂移到 body 等边界情况）
+const relayDirty = new Set<string>();
+const markRelayDirty = (el: HTMLInputElement, key: string) =>
+  el.addEventListener("input", () => relayDirty.add(key));
+markRelayDirty(relayUrlEl, "url");
+markRelayDirty(relayGroupEl, "group");
+markRelayDirty(relayKeyEl, "key");
+
+function relayPatch(patch: Record<string, unknown>) {
+  invoke("relay_update_settings", { patch }).catch((e) => alert(`设置失败: ${e}`));
+}
+
+// 开关即时生效；地址/分组/密钥走「保存并连接」一次提交
+relayEnabledEl.onchange = () => relayPatch({ enabled: relayEnabledEl.checked });
+
+$("#relay-save").addEventListener("click", () => {
+  relayPatch({
+    server_url: relayUrlEl.value,
+    group_id: relayGroupEl.value,
+    access_key: relayKeyEl.value,
+  });
+  relayDirty.clear();
+});
+
+function renderRelayPeers(peers: { device_id: string; name: string }[]) {
+  relayPeersEl.innerHTML = "";
+  if (!peers.length) {
+    relayPeersEl.innerHTML = '<p class="desc">分组内暂无其他在线设备。</p>';
+    return;
+  }
+  for (const p of peers) {
+    const row = document.createElement("div");
+    row.className = "lan-device";
+    const dot = document.createElement("span");
+    dot.className = "lan-dot online";
+    const meta = document.createElement("div");
+    meta.className = "lan-meta";
+    meta.textContent = p.name || p.device_id;
+    row.append(dot, meta);
+    relayPeersEl.appendChild(row);
+  }
+}
+
+async function refreshRelayState() {
+  try {
+    const s = await invoke<RelayStateDto>("relay_get_state");
+    relayEnabledEl.checked = s.enabled;
+    // 用户碰过的输入框（未保存）一律不覆盖；首次加载或未被编辑时才回填
+    if (!relayDirty.has("url") && (!relayLoaded || document.activeElement !== relayUrlEl))
+      relayUrlEl.value = s.server_url;
+    if (!relayDirty.has("group") && (!relayLoaded || document.activeElement !== relayGroupEl))
+      relayGroupEl.value = s.group_id;
+    if (!relayDirty.has("key") && (!relayLoaded || document.activeElement !== relayKeyEl))
+      relayKeyEl.value = s.access_key;
+    relayStatusEl.textContent = s.status;
+    renderRelayPeers(s.peers);
+    relayLoaded = true;
+  } catch {
+    /* 后端未就绪时静默 */
+  }
+}
+
+function setRelayPolling(on: boolean) {
+  if (on && relayTimer === undefined) {
+    refreshRelayState();
+    relayTimer = window.setInterval(refreshRelayState, 2000);
+  } else if (!on && relayTimer !== undefined) {
+    window.clearInterval(relayTimer);
+    relayTimer = undefined;
+  }
+}
+
+listen("relay-state-changed", () => {
+  if (relayTimer !== undefined) refreshRelayState();
 });
 
 // ---------- 数据库信息 ----------

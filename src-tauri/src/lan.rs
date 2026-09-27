@@ -2050,8 +2050,9 @@ fn sanitize_ext(ext: &str) -> String {
 
 /// 远端记录入库：按内容哈希查重，重复则把时间顶到最前（与安卓端 touch 行为一致）
 /// 返回 true = 新增，false = 重复
+/// pub(crate)：云端中继（relay.rs）收到文本条目时复用同一入库口，双通道自动判重
 #[allow(clippy::too_many_arguments)]
-fn store_remote(
+pub(crate) fn store_remote(
     db: &rusqlite::Connection,
     kind: &str,
     content: Option<&str>,

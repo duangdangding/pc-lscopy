@@ -16,9 +16,8 @@
         <button class="tab active" data-tab="general">常规</button>
         <button class="tab" data-tab="appearance">外观</button>
         <button class="tab" data-tab="rules">记录规则</button>
-        <button class="tab" data-tab="database">数据库</button>
-        <button class="tab" data-tab="sync">局域网同步</button>
-        <button class="tab" data-tab="delete">删除管理</button>
+        <button class="tab" data-tab="data">数据管理</button>
+        <button class="tab" data-tab="sync">设备同步</button>
         <button class="tab" data-tab="about">关于</button>
       </nav>
 
@@ -113,8 +112,8 @@
         </section>
       </div>
 
-      <!-- 数据库 -->
-      <div class="tab-panel" id="tab-database" hidden>
+      <!-- 数据管理（数据库 + 删除管理） -->
+      <div class="tab-panel" id="tab-data" hidden>
         <section class="card">
           <h2>数据库</h2>
           <div class="row">
@@ -132,6 +131,32 @@
         <section class="card">
           <h2>数据库信息 <button id="db-info-refresh" class="btn small">刷新</button></h2>
           <div id="db-info" class="db-info">加载中…</div>
+        </section>
+
+        <section class="card">
+          <h2>批量删除</h2>
+          <div class="row">
+            <button class="btn" data-range="1h">最近 1 小时</button>
+            <button class="btn" data-range="today">今天</button>
+            <button class="btn" data-range="7d">最近 7 天</button>
+            <button class="btn" data-range="30d">最近 30 天</button>
+            <button class="btn danger" data-range="all">清空全部</button>
+          </div>
+          <p class="desc">范围内有置顶记录时会先询问：连同置顶一起删除 / 只删除非置顶 / 取消。</p>
+        </section>
+
+        <section class="card">
+          <h2>按时间区间删除</h2>
+          <label class="field">开始时间
+            <input id="del-start" type="datetime-local" step="1" />
+          </label>
+          <label class="field">结束时间
+            <input id="del-end" type="datetime-local" step="1" />
+          </label>
+          <div class="row">
+            <button id="btn-del-between" class="btn danger">删除该区间记录</button>
+          </div>
+          <p class="desc" id="del-result"></p>
         </section>
       </div>
 
@@ -219,34 +244,37 @@
           </div>
           <div id="lan-devices" class="lan-list"><p class="desc">未发现设备。请确认对方已开启「可被发现」，或手动添加 IP。</p></div>
         </section>
-      </div>
 
-      <!-- 删除管理 -->
-      <div class="tab-panel" id="tab-delete" hidden>
+        <!-- 云端中继 -->
         <section class="card">
-          <h2>批量删除</h2>
-          <div class="row">
-            <button class="btn" data-range="1h">最近 1 小时</button>
-            <button class="btn" data-range="today">今天</button>
-            <button class="btn" data-range="7d">最近 7 天</button>
-            <button class="btn" data-range="30d">最近 30 天</button>
-            <button class="btn danger" data-range="all">清空全部</button>
+          <h2>中继服务</h2>
+          <label class="check"><input id="relay-enabled" type="checkbox" /> 启用云端中继（设备不在同一局域网时也能同步剪贴板）</label>
+          <div class="lan-info-grid">
+            <span class="lan-label">服务器地址</span>
+            <span class="lan-inline">
+              <input id="relay-url" type="text" placeholder="如 1.2.3.4:8780 或 wss://relay.example.com" style="width: 260px" />
+            </span>
+
+            <span class="lan-label">分组 ID</span>
+            <span class="lan-inline">
+              <input id="relay-group" type="text" placeholder="同一分组的设备互相同步，如 my-family" style="width: 260px" />
+            </span>
+
+            <span class="lan-label">接入密钥</span>
+            <span class="lan-inline">
+              <input id="relay-key" type="password" placeholder="服务器 RELAY_ACCESS_KEYS 之一" style="width: 260px" />
+            </span>
           </div>
-          <p class="desc">范围内有置顶记录时会先询问：连同置顶一起删除 / 只删除非置顶 / 取消。</p>
+          <div class="row" style="margin-top: 10px">
+            <button id="relay-save" class="btn">保存并连接</button>
+            <span id="relay-status" class="desc" style="align-self: center">…</span>
+          </div>
+          <p class="desc">密钥仅保存在本机配置文件中，通过挑战-响应鉴权，从不上线传输。地址、分组、密钥修改后自动重连。当前仅文本经中继同步，图片/文件仍走局域网。</p>
         </section>
 
         <section class="card">
-          <h2>按时间区间删除</h2>
-          <label class="field">开始时间
-            <input id="del-start" type="datetime-local" step="1" />
-          </label>
-          <label class="field">结束时间
-            <input id="del-end" type="datetime-local" step="1" />
-          </label>
-          <div class="row">
-            <button id="btn-del-between" class="btn danger">删除该区间记录</button>
-          </div>
-          <p class="desc" id="del-result"></p>
+          <h2>在线设备（经中继）</h2>
+          <div id="relay-peers" class="lan-list"><p class="desc">未连接。</p></div>
         </section>
       </div>
 

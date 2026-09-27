@@ -20,6 +20,7 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut}
 use tauri_plugin_opener::OpenerExt;
 
 mod lan;
+mod relay;
 
 // macOS 的 NSPasteboard 不是线程安全的：后台线程读写会与应用主线程（WebKit 周期性
 // 轮询 changeCount）竞争，导致内存损坏闪退（tauri-plugins-workspace#3205）。
@@ -94,12 +95,13 @@ impl Default for AppConfig {
     }
 }
 
-/// 合并后的配置文件结构：通用设置 + 局域网同步设置保存在同一个 JSON
+/// 合并后的配置文件结构：通用设置 + 局域网同步设置 + 云端中继设置保存在同一个 JSON
 #[derive(Serialize, Deserialize, Default)]
 #[serde(default)]
 struct ConfigFile {
     app: AppConfig,
     lan: lan::LanSettings,
+    relay: relay::RelaySettings,
 }
 
 /// 配置文件目录指针文件：始终放在 exe 同目录，内容是配置文件所在目录（空 = exe 同目录）
@@ -129,41 +131,47 @@ fn effective_config_file(cfg: &AppConfig) -> PathBuf {
         .join("lscopy-config.json")
 }
 
-/// 解析配置文件文本为（通用设置, 局域网设置）。
+/// 解析配置文件文本为（通用设置, 局域网设置, 中继设置）。
 /// 兼容旧格式：扁平的 AppConfig JSON（局域网设置再从旧 lscopy-lan.json 读）。
-fn load_config_full(raw: Option<&str>) -> (AppConfig, lan::LanSettings) {
+fn load_config_full(raw: Option<&str>) -> (AppConfig, lan::LanSettings, relay::RelaySettings) {
     if let Some(text) = raw {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
-            if v.get("app").is_some() || v.get("lan").is_some() {
-                // 新格式：{ "app": {...}, "lan": {...} }（各字段缺失时按默认值填充）
+            if v.get("app").is_some() || v.get("lan").is_some() || v.get("relay").is_some() {
+                // 新格式：{ "app": {...}, "lan": {...}, "relay": {...} }（各字段缺失时按默认值填充）
                 if let Ok(mut cf) = serde_json::from_value::<ConfigFile>(v) {
                     cf.lan = lan::parse_settings(
                         serde_json::to_string(&cf.lan).ok().as_deref(),
                     );
-                    return (cf.app, cf.lan);
+                    return (cf.app, cf.lan, cf.relay);
                 }
             } else {
                 // 旧格式：整个文件就是 AppConfig
                 let app: AppConfig = serde_json::from_value(v).unwrap_or_default();
                 let old_lan = exe_dir().join("lscopy-lan.json");
                 let lan_raw = std::fs::read_to_string(&old_lan).ok();
-                return (app, lan::parse_settings(lan_raw.as_deref()));
+                return (
+                    app,
+                    lan::parse_settings(lan_raw.as_deref()),
+                    relay::RelaySettings::default(),
+                );
             }
         }
     }
     (
         AppConfig::default(),
         lan::parse_settings(None),
+        relay::RelaySettings::default(),
     )
 }
 
-/// 把「通用设置 + 局域网设置」合并写入配置文件。
-/// 锁顺序固定：config → lan.settings → config_file，各调用点不得反向加锁。
+/// 把「通用设置 + 局域网设置 + 中继设置」合并写入配置文件。
+/// 锁顺序固定：config → lan.settings → relay.settings → config_file，各调用点不得反向加锁。
 pub(crate) fn persist_config(state: &AppState) -> Result<(), String> {
     let app = state.config.lock().unwrap().clone();
     let lan = state.lan.settings.lock().unwrap().clone();
+    let relay = state.relay.settings.lock().unwrap().clone();
     let path = state.config_file.lock().unwrap().clone();
-    let cf = ConfigFile { app, lan };
+    let cf = ConfigFile { app, lan, relay };
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
@@ -288,6 +296,8 @@ struct AppState {
     pending_size: Mutex<Option<(u32, u32)>>,
     // 局域网同步模块共享状态
     pub(crate) lan: lan::LanShared,
+    // 云端中继模块共享状态
+    pub(crate) relay: relay::RelayShared,
 }
 
 pub(crate) fn now_secs() -> i64 {
@@ -1019,6 +1029,11 @@ fn start_watcher(app: AppHandle) {
             if changed {
                 prune(&db, max_items);
                 let _ = app.emit("clip-added", ());
+                // 云端中继：仅文本走中继（图片/文件仅局域网，见 docs/relay-sync-design.md §7.3）
+                if let Cand::Text(text, h) = &cand {
+                    drop(db);
+                    relay::push_local_text(&state, text, *h);
+                }
             }
         }
     });
@@ -2195,7 +2210,7 @@ pub fn run() {
                 }
             }
             let raw = std::fs::read_to_string(&config_file).ok();
-            let (config, lan_settings) = load_config_full(raw.as_deref());
+            let (config, lan_settings, relay_settings) = load_config_full(raw.as_deref());
             let db = init_db(&effective_db_path(&config))?;
             app.manage(AppState {
                 db: Mutex::new(db),
@@ -2212,6 +2227,7 @@ pub fn run() {
                 main_focused: AtomicBool::new(false),
                 pending_size: Mutex::new(None),
                 lan: lan::LanShared::new(lan_settings),
+                relay: relay::RelayShared::new(relay_settings),
             });
             // 统一为合并格式落盘一次（旧格式/旧局域网文件 → 新 ConfigFile）
             {
@@ -2370,6 +2386,8 @@ pub fn run() {
             start_watcher(app.handle().clone());
             // 启动局域网同步模块（beacon 收发 + 自动同步，按开关启停 HTTP 服务）
             lan::start(app.handle());
+            // 启动云端中继客户端（按配置连接，未启用时空转等待）
+            relay::start(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -2410,6 +2428,8 @@ pub fn run() {
             lan::lan_block,
             lan::lan_unblock,
             lan::lan_respond_pair,
+            relay::relay_get_state,
+            relay::relay_update_settings,
             lan::transfer::transfer_send,
             lan::transfer::transfer_send_ip,
             lan::transfer::transfer_respond_recv,
