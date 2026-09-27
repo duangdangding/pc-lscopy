@@ -1,0 +1,16 @@
+services:
+  relay:
+    # 默认使用 GHCR 预构建镜像（x64 + ARM 双架构）；本地开发可改用下面注释掉的 build
+    image: ghcr.io/duangdangding/lscopy-relay:latest
+    # build: .
+    container_name: lscopy-relay
+    ports:
+      - "8780:8780"
+    environment:
+      RELAY_PORT: 8780
+      # 接入密钥列表（逗号分隔，至少一个；请改成你自己的强随机密钥）
+      RELAY_ACCESS_KEYS: "change-me-to-a-long-random-key"
+      RELAY_DATA_DIR: /data
+    volumes:
+      - ./data:/data
+    restart: unless-stopped

@@ -33,6 +33,14 @@
 - 安装版走 Tauri 官方 updater（NSIS 装回原目录）
 - 便携版走自研链路：流式下载 → SHA-256 校验 → 替换 exe 并重启
 
+### 云端中继同步（开发中，M1）
+
+- 自建中继服务器（`relay-server/`），设备不在同一局域网时也能互相同步剪贴板
+- WebSocket 长连接 + 强制鉴权（挑战-响应 HMAC，未过鉴权直接断连）
+- 分组内转发、在线名单广播；与局域网同步双通道并存，内容哈希去重
+- 支持手动运行与 Docker 部署（推 tag 自动发布 GHCR 多架构镜像）；离线暂存（M3）、端到端加密（M4）规划中
+- 设计文档：`docs/relay-sync-design.md`
+
 ## 技术栈
 
 | 层 | 技术 |
@@ -64,6 +72,9 @@ src-tauri/
   src/main.rs       入口（仅调用 lib）
   capabilities/     Tauri 权限声明
   tauri.conf.json   窗口/打包配置（identifier: com.lsh.lscopy）
+relay-server/       自建中继服务器（M1 骨架）：WSS 接入、挑战-响应鉴权、分组转发，
+                    Dockerfile / docker-compose.yml，scripts/smoke.ts 冒烟测试
+docs/relay-sync-design.md  中继 + 局域网双通道同步设计文档
 vite.config.ts      多页面构建配置（index + settings + blocked + transfer）
 .github/workflows/  CI / 发布流程
 ```

@@ -1,0 +1,22 @@
+[package]
+name = "relay-server"
+version = "0.1.0"
+edition = "2021"
+description = "lscopy 自建中继服务器（M1 骨架）：WSS 接入 + 强制鉴权 + 分组转发"
+license = "MIT"
+
+[dependencies]
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "sync", "signal"] }
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hmac = "0.12"
+sha2 = "0.10"
+rand = "0.8"
+hex = "0.4"
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
