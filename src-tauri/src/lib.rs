@@ -104,19 +104,30 @@ struct ConfigFile {
     relay: relay::RelaySettings,
 }
 
-/// 配置文件目录指针文件：始终放在 exe 同目录，内容是配置文件所在目录（空 = exe 同目录）
+/// 配置文件目录指针文件：内容是配置文件所在目录（空 = 默认数据目录）。
+/// 放在 default_data_dir()（mac 上不能放 .app 包内——更新会整体替换 bundle，
+/// 包内文件全部丢失，且改写包内容会破坏代码签名）
 fn config_pointer_file() -> PathBuf {
-    exe_dir().join("lscopy-config-dir.txt")
+    default_data_dir().join("lscopy-config-dir.txt")
+}
+
+/// 读取目录指针：优先新位置，兼容 exe 同目录的旧指针（仅迁移过渡期有用；
+/// mac 更新后旧 bundle 已整体被替换，旧指针随之消失，需重新设置一次）
+fn read_config_pointer() -> Option<String> {
+    let read = |p: PathBuf| {
+        std::fs::read_to_string(p)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    read(config_pointer_file()).or_else(|| read(exe_dir().join("lscopy-config-dir.txt")))
 }
 
 /// 当前生效的配置文件路径（读指针文件决定目录）
 fn current_config_file() -> PathBuf {
-    let dir = std::fs::read_to_string(config_pointer_file())
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    let dir = read_config_pointer()
         .map(PathBuf::from)
-        .unwrap_or_else(exe_dir);
+        .unwrap_or_else(default_data_dir);
     dir.join("lscopy-config.json")
 }
 
@@ -127,7 +138,7 @@ fn effective_config_file(cfg: &AppConfig) -> PathBuf {
         .map(|d| d.trim())
         .filter(|d| !d.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(exe_dir)
+        .unwrap_or_else(default_data_dir)
         .join("lscopy-config.json")
 }
 
@@ -313,7 +324,7 @@ pub(crate) fn hash_bytes(data: &[u8]) -> u64 {
     h.finish()
 }
 
-// 软件所在目录（配置文件/数据库默认都放这里，便携模式）
+// 软件所在目录（Windows 便携模式的默认数据位置）
 pub(crate) fn exe_dir() -> PathBuf {
     std::env::current_exe()
         .ok()
@@ -321,10 +332,26 @@ pub(crate) fn exe_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// 默认数据目录（配置文件/数据库/目录指针的缺省位置）。
+/// Windows 保持便携模式 = exe 同目录；macOS 的 .app 会被更新整体替换，
+/// 包内数据（含目录指针）每次更新都会丢，故缺省放 Application Support。
+pub(crate) fn default_data_dir() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home) = dirs::home_dir() {
+            return home
+                .join("Library")
+                .join("Application Support")
+                .join("com.lsh.lscopy");
+        }
+    }
+    exe_dir()
+}
+
 fn effective_db_path(cfg: &AppConfig) -> PathBuf {
     let dir = match &cfg.db_dir {
         Some(d) if !d.trim().is_empty() => PathBuf::from(d),
-        _ => exe_dir(),
+        _ => default_data_dir(),
     };
     dir.join("lscopy.db")
 }
@@ -1621,10 +1648,19 @@ fn save_config(
         let _ = std::fs::remove_file(&probe);
 
         let old_file = state.config_file.lock().unwrap().clone();
-        // 指针文件：空字符串表示默认（exe 同目录）
+        // 指针文件：空字符串表示默认（默认数据目录）
         let pointer = config.config_dir.clone().unwrap_or_default();
-        std::fs::write(config_pointer_file(), pointer)
+        let pointer_file = config_pointer_file();
+        if let Some(dir) = pointer_file.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("创建配置目录失败：{}", e))?;
+        }
+        std::fs::write(&pointer_file, pointer)
             .map_err(|e| format!("保存配置目录设置失败：{}", e))?;
+        // 清理 exe 同目录的旧指针（mac 上位于 .app 包内，避免改写 bundle）
+        let legacy_pointer = exe_dir().join("lscopy-config-dir.txt");
+        if legacy_pointer != pointer_file {
+            let _ = std::fs::remove_file(legacy_pointer);
+        }
         *state.config_file.lock().unwrap() = new_file.clone();
         if migrate_config && old_file != new_file {
             let _ = std::fs::remove_file(&old_file);
@@ -2202,9 +2238,10 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
-            // 配置文件放在软件同目录（便携模式，和数据库默认位置一致），
-            // 实际目录由指针文件 lscopy-config-dir.txt 决定（可在设置里自定义）。
-            // 旧版本配置在系统配置目录：首次启动自动迁移过来
+            // 配置文件默认在 default_data_dir()（Windows 便携模式 = exe 同目录；
+            // macOS = ~/Library/Application Support/com.lsh.lscopy，因为更新会整体替换
+            // .app，包内数据每次更新都会丢），实际目录由指针文件 lscopy-config-dir.txt
+            // 决定（可在设置里自定义）。旧版本配置在系统配置目录：首次启动自动迁移过来
             let config_file = current_config_file();
             if !config_file.exists() {
                 let legacy = app
@@ -2212,13 +2249,31 @@ pub fn run() {
                     .app_config_dir()
                     .map_err(|e| e.to_string())?
                     .join("lscopy-config.json");
-                if legacy.exists() {
+                if legacy.exists() && legacy != config_file {
                     let _ = std::fs::copy(&legacy, &config_file);
+                }
+            }
+            // mac 过渡兜底：旧版本配置/数据库可能在 .app 包内（exe 同目录），
+            // 新默认位置没有时拷过来（更新场景旧 bundle 已被替换，查不到也无害）
+            if !config_file.exists() {
+                let in_bundle = exe_dir().join("lscopy-config.json");
+                if in_bundle != config_file && in_bundle.exists() {
+                    let _ = std::fs::copy(&in_bundle, &config_file);
                 }
             }
             let raw = std::fs::read_to_string(&config_file).ok();
             let (config, lan_settings, relay_settings) = load_config_full(raw.as_deref());
-            let db = init_db(&effective_db_path(&config))?;
+            let db_path = effective_db_path(&config);
+            if !db_path.exists() {
+                let in_bundle_db = exe_dir().join("lscopy.db");
+                if in_bundle_db != db_path && in_bundle_db.exists() {
+                    if let Some(dir) = db_path.parent() {
+                        let _ = std::fs::create_dir_all(dir);
+                    }
+                    let _ = std::fs::copy(&in_bundle_db, &db_path);
+                }
+            }
+            let db = init_db(&db_path)?;
             app.manage(AppState {
                 db: Mutex::new(db),
                 config: Mutex::new(config.clone()),

@@ -685,26 +685,30 @@ function renderLanDevices(devices: LanDeviceDto[]) {
       };
       actions.appendChild(pair);
     } else {
-      const sync = lanBtn("同步");
-      sync.onclick = async () => {
-        const mode = await syncModeDialog(d.name || "未知设备");
-        if (!mode) return;
-        sync.disabled = true;
-        try {
-          const msg = await invoke<string>("lan_sync_now", { deviceId: d.device_id, mode });
-          alert(msg);
-        } catch (e) {
-          alert(`同步失败: ${e}`);
-        }
-        refreshLanState();
-      };
+      // 手动「同步」走局域网 HTTP（/clips）；仅云端可达的设备由中继自动推送，不提供该按钮
+      if (d.via !== "relay") {
+        const sync = lanBtn("同步");
+        sync.onclick = async () => {
+          const mode = await syncModeDialog(d.name || "未知设备");
+          if (!mode) return;
+          sync.disabled = true;
+          try {
+            const msg = await invoke<string>("lan_sync_now", { deviceId: d.device_id, mode });
+            alert(msg);
+          } catch (e) {
+            alert(`同步失败: ${e}`);
+          }
+          refreshLanState();
+        };
+        actions.appendChild(sync);
+      }
       const unpair = lanBtn("解除配对");
       unpair.onclick = async () => {
         if (!(await confirmDialog(`确定解除与「${d.name}」的配对？`))) return;
         await invoke("lan_unpair", { deviceId: d.device_id });
         refreshLanState();
       };
-      actions.append(sync, unpair);
+      actions.append(unpair);
       // 离线残留记录（对方换 IP/重装后旧记录还在）：允许手动删除，仅清理本机，不通知对方
       if (!d.online) {
         const forget = lanBtn("删除记录", "danger");
@@ -1226,6 +1230,13 @@ listen("open-update-tab", () => {
 (async () => {
   config = await loadConfig();
   applyAppearance(config);
+
+  // 默认数据目录按平台区分：Windows 便携模式 = 程序所在目录；
+  // macOS 更新会整体替换 .app，默认在 Application Support
+  const isMac = navigator.userAgent.includes("Mac OS X");
+  const dirHint = isMac ? "默认：Application Support 目录" : "默认：程序所在目录";
+  dbDirEl.placeholder = dirHint;
+  configDirEl.placeholder = dirHint;
 
   hotkeyEl.value = config.hotkey;
   enabledEl.checked = config.enabled;

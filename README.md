@@ -106,7 +106,7 @@ cargo clippy           # lint
 - 构建必须走 Tauri CLI（`bun run tauri build`），不要裸 `cargo build --release`。
 - 版本号需同步修改 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 三处。
 - 推 `v*` tag 触发 `.github/workflows/release.yml`，Windows + macOS 并行构建，产物包含安装包、便携版、macOS dmg / app.tar.gz、updater 签名与 SHA-256 校验文件。
-- 配置统一保存在 `lscopy-config.json`（顶层 `app` + `lan` 两键），默认在 exe 同目录（便携模式）；数据库 `lscopy.db` 默认也在 exe 同目录。
+- 配置统一保存在 `lscopy-config.json`（顶层 `app` + `lan` + `relay` 三键）。默认数据目录：Windows = exe 同目录（便携模式）；macOS = `~/Library/Application Support/com.lsh.lscopy`（更新会整体替换 .app，包内数据每次更新都会丢，故不放包内）。数据库 `lscopy.db` 同目录。
 
 ## 环境要求
 

@@ -1,6 +1,6 @@
 [package]
 name = "lscopy"
-version = "1.4.1"
+version = "1.4.2"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -34,6 +34,8 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 base64 = "0.22"
 enigo = "0.2"
 if-addrs = "0.14"
+# mac 默认数据目录（~/Library/Application Support）取 home 目录用
+dirs = "6"
 ureq = "2"
 sha2 = "0.10"
 # 云端中继客户端（relay.rs）：WebSocket + HMAC 鉴权

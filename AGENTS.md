@@ -132,9 +132,11 @@ cargo clippy           # lint
 - **构建必须走 Tauri CLI**（`bun run tauri build` / `tauri dev`），不要裸 `cargo build --release`：CLI 会开启 `custom-protocol` 特性并正确处理前端资源协议，裸 cargo 构建的 exe 会显示"无法访问页面"。
 - Windows 为主要目标平台；`winreg` 仅 Windows 编译（`cfg(windows)`）。
 - 剪贴板图片读取有 Windows 原生兜底逻辑（CF_BITMAP/CF_DIB），改动相关代码时注意不要回归截图软件兼容性。
-- 配置统一保存在 `lscopy-config.json`（顶层 `app` + `lan` + `relay` 三键），默认在 **exe 同目录**（便携模式）；
-  实际目录由 exe 同目录的指针文件 `lscopy-config-dir.txt` 决定（设置页「配置文件」可自定义，
-  改动时询问是否迁移旧文件）。数据库 `lscopy.db` 默认也在 exe 同目录；旧版系统配置目录
+- 配置统一保存在 `lscopy-config.json`（顶层 `app` + `lan` + `relay` 三键），默认数据目录由 `default_data_dir()` 决定：
+  **Windows = exe 同目录**（便携模式）；**macOS = `~/Library/Application Support/com.lsh.lscopy`**
+  （mac 更新会整体替换 .app，包内的配置/数据库/目录指针每次更新都会丢，改写包内容还会破坏代码签名）。
+  实际目录由默认数据目录下的指针文件 `lscopy-config-dir.txt` 决定（设置页「配置文件」可自定义，
+  改动时询问是否迁移旧文件；读取时兼容 exe 同目录的旧指针）。数据库 `lscopy.db` 默认同目录；旧版系统配置目录
   （`%APPDATA%`）的配置会在首次启动时自动迁移。落盘统一走 `persist_config`（锁顺序固定 config → lan.settings → relay.settings → config_file）。
 - 主窗口失焦自动隐藏是**延迟 150ms 复查**实现的（拖动/缩放会造成瞬时失焦）；改动窗口事件逻辑时注意 `dragging` / `panel_pinned` / `main_focused` 三个状态。
 - 版本号需同步修改 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 三处（`Cargo.lock` 随构建自动更新）。

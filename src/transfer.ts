@@ -16,6 +16,7 @@ interface LanDeviceDto {
   sharing: boolean;
   paired: boolean;
   online: boolean;
+  via: string; // "" 离线 | "lan" | "relay" | "lan+relay"
 }
 
 interface LanStateDto {
@@ -83,8 +84,9 @@ function fmtTime(secs: number): string {
 function renderDevices() {
   const listEl = $<HTMLDivElement>("#tf-devices");
   listEl.innerHTML = "";
-  // 只显示实时扫描到的在线设备：离线/历史配对记录不出现在列表里
-  const shown = devices.filter((d) => d.online);
+  // 只显示实时扫描到的在线设备：离线/历史配对记录不出现在列表里；
+  // 互传走局域网 HTTP（POST /recv），仅云端可达（via === "relay"）的设备也要排除
+  const shown = devices.filter((d) => d.online && d.via !== "relay");
   if (!shown.length) {
     const p = document.createElement("p");
     p.className = "desc";
