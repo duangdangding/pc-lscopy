@@ -48,6 +48,7 @@ pub struct AppConfig {
     pub remember_size: bool,     // 记住窗口大小（重启后恢复上次长宽）
     pub window_width: u32,       // 记住的窗口宽度（物理像素）
     pub window_height: u32,      // 记住的窗口高度（物理像素）
+    pub follow_cursor_monitor: bool, // 多显示器：唤起时面板跟随光标所在屏幕
 }
 
 /// 默认全局快捷键：全平台统一 Ctrl+`（mac 上即 Control+`）
@@ -91,6 +92,7 @@ impl Default for AppConfig {
             remember_size: false,
             window_width: 420,
             window_height: 640,
+            follow_cursor_monitor: true,
         }
     }
 }
@@ -2050,11 +2052,55 @@ fn toggle_window(app: &AppHandle) {
         } else {
             // 记住弹出前的前台窗口，粘贴后把焦点还给它
             *app.state::<AppState>().prev_hwnd.lock().unwrap() = foreground_hwnd();
+            if app
+                .state::<AppState>()
+                .config
+                .lock()
+                .unwrap()
+                .follow_cursor_monitor
+            {
+                move_panel_to_cursor_monitor(&win);
+            }
             let _ = win.show();
             let _ = win.set_focus();
             let _ = app.emit("panel-shown", ());
         }
     }
+}
+
+/// 多显示器：唤起前把面板挪到光标所在屏幕。
+/// 面板中心已在该屏幕上则不挪动（尊重用户摆过的位置），否则居中到该屏幕。
+fn move_panel_to_cursor_monitor(win: &tauri::WebviewWindow) {
+    let (Ok(cursor), Ok(monitors)) = (win.cursor_position(), win.available_monitors()) else {
+        return;
+    };
+    // 显示器与窗口坐标都是物理像素，同一坐标空间，可直接做包含判断
+    let contains = |m: &tauri::window::Monitor, x: f64, y: f64| {
+        let p = m.position();
+        let s = m.size();
+        x >= p.x as f64
+            && x < (p.x + s.width as i32) as f64
+            && y >= p.y as f64
+            && y < (p.y + s.height as i32) as f64
+    };
+    let Some(mon) = monitors.iter().find(|m| contains(m, cursor.x, cursor.y)) else {
+        return;
+    };
+    let (Ok(wp), Ok(ws)) = (win.outer_position(), win.outer_size()) else {
+        return;
+    };
+    let cx = wp.x as f64 + ws.width as f64 / 2.0;
+    let cy = wp.y as f64 + ws.height as f64 / 2.0;
+    if contains(mon, cx, cy) {
+        return;
+    }
+    let mp = mon.position();
+    let ms = mon.size();
+    let nx = mp.x + (ms.width as i32 - ws.width as i32) / 2;
+    let ny = mp.y + (ms.height as i32 - ws.height as i32) / 2;
+    let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+        nx, ny,
+    )));
 }
 
 // ---------- 便携版应用内更新 ----------

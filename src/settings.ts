@@ -16,6 +16,7 @@ const enabledEl = $<HTMLInputElement>("#enabled");
 const autostartEl = $<HTMLInputElement>("#autostart");
 const silentStartEl = $<HTMLInputElement>("#silent-start");
 const rememberSizeEl = $<HTMLInputElement>("#remember-size");
+const followCursorMonitorEl = $<HTMLInputElement>("#follow-cursor-monitor");
 const dbDirEl = $<HTMLInputElement>("#db-dir");
 const themeEl = $<HTMLSelectElement>("#theme");
 const fontFamilyEl = $<HTMLInputElement>("#font-family");
@@ -953,6 +954,7 @@ $("#btn-save").addEventListener("click", async () => {
     // 尺寸由后端在开启时抓取当前实际值，这里带上已有值兜底
     window_width: config.window_width,
     window_height: config.window_height,
+    follow_cursor_monitor: followCursorMonitorEl.checked,
   };
   try {
     await invoke("save_config", { config: next, migrateConfig });
@@ -1243,6 +1245,7 @@ listen("open-update-tab", () => {
   autostartEl.checked = config.autostart;
   silentStartEl.checked = config.silent_start;
   rememberSizeEl.checked = config.remember_size ?? false;
+  followCursorMonitorEl.checked = config.follow_cursor_monitor ?? true;
   dbDirEl.value = config.db_dir || "";
   configDirEl.value = config.config_dir || "";
   themeEl.value = config.theme;

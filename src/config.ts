@@ -17,6 +17,7 @@ export interface AppConfig {
   remember_size: boolean; // 记住窗口大小
   window_width: number; // 记住的窗口宽度（物理像素）
   window_height: number; // 记住的窗口高度（物理像素）
+  follow_cursor_monitor: boolean; // 多显示器：唤起时面板跟随光标所在屏幕
 }
 
 export async function loadConfig(): Promise<AppConfig> {
