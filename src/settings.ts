@@ -716,8 +716,19 @@ function renderLanDevices(devices: LanDeviceDto[]) {
       }
       const unpair = lanBtn("解除配对");
       unpair.onclick = async () => {
-        if (!(await confirmDialog(`确定解除与「${d.name}」的配对？`))) return;
-        await invoke("lan_unpair", { deviceId: d.device_id });
+        const choice = await choiceDialog(
+          `确定解除与「${d.name}」的配对？\n请选择如何处理已从该设备同步的记录（置顶记录始终保留）。`,
+          [
+            { value: "cancel", text: "取消" },
+            { value: "keep", text: "解除配对，保留记录", kind: "primary" },
+            { value: "delete", text: "解除配对，删除记录及同步文件", kind: "danger" },
+          ]
+        );
+        if (!choice || choice === "cancel") return;
+        await invoke("lan_unpair", {
+          deviceId: d.device_id,
+          deleteClips: choice === "delete",
+        });
         refreshLanState();
       };
       actions.append(unpair);
@@ -725,13 +736,19 @@ function renderLanDevices(devices: LanDeviceDto[]) {
       if (!d.online) {
         const forget = lanBtn("删除记录", "danger");
         forget.onclick = async () => {
-          if (
-            !(await confirmDialog(
-              `确定删除「${d.name}」的本地配对记录？\n仅清理本机残留记录，不会通知对方；对方在线时请改用「解除配对」。`
-            ))
-          )
-            return;
-          await invoke("lan_forget_device", { deviceId: d.device_id });
+          const choice = await choiceDialog(
+            `确定删除「${d.name}」的本地配对记录？\n仅清理本机残留记录，不会通知对方；对方在线时请改用「解除配对」。\n请选择如何处理已从该设备同步的记录（置顶记录始终保留）。`,
+            [
+              { value: "cancel", text: "取消" },
+              { value: "keep", text: "删除配对记录，保留同步内容" },
+              { value: "delete", text: "删除配对记录及同步内容", kind: "danger" },
+            ]
+          );
+          if (!choice || choice === "cancel") return;
+          await invoke("lan_forget_device", {
+            deviceId: d.device_id,
+            deleteClips: choice === "delete",
+          });
           refreshLanState();
         };
         actions.appendChild(forget);
@@ -799,9 +816,11 @@ function setLanPolling(on: boolean) {
 }
 
 // 对方发起配对请求：弹窗确认（30 秒无人答复则自动按"需确认"失败）
+// 后端收到请求会先自动弹出设置窗口，这里切到「设备同步」页提供上下文
 listen<{ device_id: string; name: string; model: string | null; host: string | null }>(
   "lan-pair-request",
   async (e) => {
+    document.querySelector<HTMLButtonElement>('.tabs .tab[data-tab="sync"]')?.click();
     const d = e.payload;
     const accept = await confirmDialog(
       `设备「${d.name}」${d.model ? `（${d.model}）` : ""}${d.host ? `\n来自 ${d.host}` : ""}\n请求与本机配对并同步剪贴板。是否同意？`

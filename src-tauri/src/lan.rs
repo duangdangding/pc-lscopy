@@ -859,8 +859,16 @@ fn handle_pair(
     }
 }
 
-/// 配对确认：设置页在前台时弹窗等待用户确认（最多 30 秒），无人应答返回 None
+/// 配对确认：自动弹出设置窗口并切到「设备同步」页弹窗确认（最多 30 秒），无人应答返回 None
 fn ask_pair_approval(app: &AppHandle, requester: &LanDevice) -> Option<bool> {
+    // 收到配对请求时自动弹出设置窗口，否则窗口关着时请求只会等到超时
+    if let Some(w) = app.get_webview_window("settings") {
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+    // macOS 整个 App 可能被隐藏（NSApplication.hide），需要先唤回
+    #[cfg(target_os = "macos")]
+    let _ = app.show();
     let (tx, rx) = mpsc::channel();
     app.state::<AppState>()
         .lan
@@ -1803,16 +1811,69 @@ fn sync_device_inner(
             pages.push(fetch_page(app, device_id, device, since, None, None, false)?);
         }
         SyncMode::Recent { count } => {
-            // 最新优先，取前 N 条
-            pages.push(fetch_page(
-                app,
-                device_id,
-                device,
-                0,
-                None,
-                Some((*count).clamp(1, 5000)),
-                true,
-            )?);
+            let count = (*count).clamp(1, 5000);
+            // 先按扩展协议请服务端按时间倒序取 N 条；不认识 order=desc 的旧服务端
+            // （如安卓端）会按升序原样返回，此时回退为客户端分页拉全量、本地取最新 N 条
+            let first = fetch_page(app, device_id, device, 0, None, Some(count), true)?;
+            let ts: Vec<i64> = first
+                .iter()
+                .filter_map(|o| o.get("timestamp").and_then(|v| v.as_i64()))
+                .collect();
+            let server_desc = ts.windows(2).all(|w| w[0] >= w[1]);
+            if server_desc {
+                // 服务端可能忽略了 limit 倒序返回了全量，截断到 N 条
+                let mut first = first;
+                first.truncate(count as usize);
+                pages.push(first);
+            } else {
+                // 升序游标分页拉全量（与 All 模式相同，带进度保护防参数被忽略导致死循环），
+                // 按 id 去重后按时间倒序取最新 N 条
+                let mut by_id: HashMap<i64, Value> = HashMap::new();
+                let mut no_id: Vec<Value> = Vec::new();
+                let mut cursor: i64 = 0;
+                let mut page = first;
+                // 第一页是按 limit=count 请求的，期望页长先从 count 起算，之后按分页页长，
+                // 否则服务端遵守 limit 但忽略 order 时会把第一页误判成最后一页
+                let mut expected = count as usize;
+                loop {
+                    let len = page.len();
+                    let max_ts = page
+                        .iter()
+                        .filter_map(|o| o.get("timestamp").and_then(|v| v.as_i64()))
+                        .max();
+                    for o in page {
+                        match o.get("id").and_then(|v| v.as_i64()) {
+                            Some(id) => {
+                                by_id.insert(id, o);
+                            }
+                            None => no_id.push(o),
+                        }
+                    }
+                    if len < expected {
+                        break;
+                    }
+                    match max_ts {
+                        Some(ts) if ts > cursor => cursor = ts - 1,
+                        _ => break,
+                    }
+                    page = fetch_page(
+                        app,
+                        device_id,
+                        device,
+                        cursor,
+                        None,
+                        Some(CLIPS_PAGE_LIMIT),
+                        false,
+                    )?;
+                    expected = CLIPS_PAGE_LIMIT as usize;
+                }
+                let mut items: Vec<Value> = by_id.into_values().chain(no_id).collect();
+                items.sort_by_key(|o| {
+                    std::cmp::Reverse(o.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0))
+                });
+                items.truncate(count as usize);
+                pages.push(items);
+            }
         }
         SyncMode::Day { start_ms, end_ms } => {
             // 服务端语义为 since 不含 / until 含，故下界减 1ms 覆盖整天
@@ -1928,7 +1989,9 @@ fn import_clip(app: &AppHandle, obj: &Value, device: &LanDevice) -> bool {
     let wire_type = obj.get("type").and_then(|v| v.as_i64()).unwrap_or(WIRE_TEXT);
     let text = get_str("text");
     let timestamp_ms = obj.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0);
-    let created_at = (timestamp_ms / 1000).max(0);
+    // 入库时间一律用本机当前时间：同步来的记录作为新记录排在列表最前，不沿用对方的
+    // 原始时间（远端 timestamp 仅用于增量游标和下面的文件命名，避免同毫秒覆盖）
+    let created_at = now_secs();
     let remote_id = obj.get("remoteId").and_then(|v| v.as_i64());
 
     if wire_type == WIRE_TEXT {
@@ -2643,9 +2706,54 @@ pub async fn lan_pair(app: AppHandle, device_id: String, token: String) -> Resul
     .map_err(|e| e.to_string())?
 }
 
-/// 解除配对：本地解除并尽力通知对方
+/// 删除某设备同步过来的记录（置顶记录始终保留）；
+/// 文件类记录若保存在配置的文件存储路径内，文件一并删除（路径外的绝不碰）
+fn delete_device_clips(app: &AppHandle, device_id: &str) {
+    let state = app.state::<AppState>();
+    let dl_dir = state
+        .lan
+        .settings
+        .lock()
+        .unwrap()
+        .download_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from);
+    let db = state.db.lock().unwrap();
+    if let Some(dir) = &dl_dir {
+        let paths: Vec<String> = db
+            .prepare(
+                "SELECT content FROM clips WHERE remote_device_id = ?1 AND kind = 'file' AND pinned = 0",
+            )
+            .and_then(|mut stmt| {
+                stmt.query_map(params![device_id], |r| r.get::<_, String>(0))
+                    .map(|rows| rows.flatten().collect())
+            })
+            .unwrap_or_default();
+        for p in paths {
+            let path = PathBuf::from(&p);
+            if path.starts_with(dir) {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+    let _ = db.execute(
+        "DELETE FROM clips WHERE remote_device_id = ?1 AND pinned = 0",
+        params![device_id],
+    );
+    drop(db);
+    // 主面板复用 clip-added 事件刷新列表
+    let _ = app.emit("clip-added", ());
+}
+
+/// 解除配对：本地解除并尽力通知对方；delete_clips 时一并删除该设备同步来的记录
 #[tauri::command]
-pub async fn lan_unpair(app: AppHandle, device_id: String) -> Result<(), String> {
+pub async fn lan_unpair(
+    app: AppHandle,
+    device_id: String,
+    delete_clips: Option<bool>,
+) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let device = state
@@ -2658,6 +2766,9 @@ pub async fn lan_unpair(app: AppHandle, device_id: String) -> Result<(), String>
             .cloned();
         state.lan.settings.lock().unwrap().paired.remove(&device_id);
         save_settings(&state);
+        if delete_clips.unwrap_or(false) {
+            delete_device_clips(&app, &device_id);
+        }
         emit_state_changed(&app);
         if let Some(d) = device {
             notify_unpair(&app, &d);
@@ -2669,8 +2780,9 @@ pub async fn lan_unpair(app: AppHandle, device_id: String) -> Result<(), String>
 
 /// 手动删除设备记录：只清理本机的配对记录/发现缓存/同步游标，不通知对方。
 /// 用于对方换 IP、重装后残留在列表里的过期记录；对方在线时应改用「解除配对」。
+/// delete_clips 时一并删除该设备同步来的记录
 #[tauri::command]
-pub fn lan_forget_device(app: AppHandle, device_id: String) {
+pub fn lan_forget_device(app: AppHandle, device_id: String, delete_clips: Option<bool>) {
     let state = app.state::<AppState>();
     {
         let mut s = state.lan.settings.lock().unwrap();
@@ -2680,6 +2792,9 @@ pub fn lan_forget_device(app: AppHandle, device_id: String) {
     save_settings(&state);
     state.lan.discovered.lock().unwrap().remove(&device_id);
     state.lan.syncing.lock().unwrap().remove(&device_id);
+    if delete_clips.unwrap_or(false) {
+        delete_device_clips(&app, &device_id);
+    }
     emit_state_changed(&app);
 }
 

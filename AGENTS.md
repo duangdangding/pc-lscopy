@@ -108,6 +108,17 @@ cargo clippy           # lint
     `if-addrs` 枚举网卡获得（mac 上 UDP connect 8.8.8.8 技巧不可靠）；组播按接口逐个加入。
   - 免码配对：`/info` 暴露 `autoAccept` 字段；对方开「自动同意配对」时 `/pair` 免配对码，
     成功响应附带本机配对码（`{"result":"ok","token":…}`），请求方存下供后续 `/clips` 鉴权。
+  - 需手动确认的配对请求：`ask_pair_approval` 会先自动弹出设置窗口（mac 还要 `app.show()`），
+    前端 `lan-pair-request` 监听里切到「设备同步」页再弹确认框（30s 超时按需确认失败）。
+  - 同步入库时间一律用**本机当前时间**（`import_clip` / relay 收 clip 都是 `now_secs()`），
+    记录作为新条目排在列表最前；远端 `timestamp` 只用于增量游标、文件命名去重和 relay E2E 的 AAD。
+  - 手动同步「最近 N 条」：先按扩展参数 `order=desc&limit=N` 请服务端倒序取 N 条；
+    服务端不认识该参数（升序返回，如安卓端）时回退为客户端游标分页拉全量、按 id 去重后
+    本地倒序取 N 条（分页带 max_ts 进度保护，防参数被忽略导致死循环）。
+  - 移除设备（解除配对 `lan_unpair` / 删除残留 `lan_forget_device`）默认**不删已同步记录**；
+    前端三选一弹窗可选「连同删除」，走 `delete_device_clips`：只删 `remote_device_id` 匹配
+    且未置顶的记录，文件类仅删配置文件存储路径内的文件（路径外绝不碰），删完发 `clip-added`
+    让主面板刷新。
   - 同步页前端每 2s 轮询重建设备列表：配对表单展开期间（`pairingDeviceId` 非空）必须跳过
     列表重建，否则输入框会被刷掉；新增实时刷新类 UI 时注意同样的坑。
 - **互传文件**（`lan/transfer.rs`，与同步共用 HTTP 服务但**免配对**）：

@@ -322,11 +322,9 @@ fn import_relay_clip(app: &AppHandle, clip: &Value) {
         _ => return, // 文件/视频/音频仅局域网（设计文档 §7.3）
     }
     let timestamp_ms = clip.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0);
-    let created_at = if timestamp_ms > 0 {
-        (timestamp_ms / 1000).max(0)
-    } else {
-        now_secs()
-    };
+    // 入库时间一律用本机当前时间：同步来的记录作为新记录排在列表最前
+    // （远端 timestamp 仍需保留原文用于 E2E 的 AAD 校验）
+    let created_at = now_secs();
     let remote_id = clip.get("remoteId").and_then(|v| v.as_i64());
 
     // 取出内容字节：密文先解密（未配分组密钥或校验失败则跳过）
