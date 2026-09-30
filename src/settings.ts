@@ -247,6 +247,7 @@ interface LanStateDto {
   encrypt_transfer: boolean;
   auto_sync: boolean;
   auto_accept_pair: boolean;
+  pair_foreground_only: boolean;
   auto_sync_interval_secs: number;
   download_dir: string;
   max_file_mb: number;
@@ -263,6 +264,7 @@ const lanSharingEl = $<HTMLInputElement>("#lan-sharing");
 const lanEncryptEl = $<HTMLInputElement>("#lan-encrypt");
 const lanAutoSyncEl = $<HTMLInputElement>("#lan-auto-sync");
 const lanAutoAcceptEl = $<HTMLInputElement>("#lan-auto-accept");
+const lanPairForegroundOnlyEl = $<HTMLInputElement>("#lan-pair-foreground-only");
 const lanNameEl = $<HTMLInputElement>("#lan-name");
 const lanTokenEl = $<HTMLElement>("#lan-token");
 const lanPortEl = $<HTMLInputElement>("#lan-port");
@@ -281,6 +283,8 @@ lanSharingEl.onchange = () => lanPatch({ sharing: lanSharingEl.checked });
 lanEncryptEl.onchange = () => lanPatch({ encrypt_transfer: lanEncryptEl.checked });
 lanAutoSyncEl.onchange = () => lanPatch({ auto_sync: lanAutoSyncEl.checked });
 lanAutoAcceptEl.onchange = () => lanPatch({ auto_accept_pair: lanAutoAcceptEl.checked });
+lanPairForegroundOnlyEl.onchange = () =>
+  lanPatch({ pair_foreground_only: lanPairForegroundOnlyEl.checked });
 
 // 自动同步间隔（秒），失焦即生效
 const lanSyncIntervalEl = $<HTMLInputElement>("#lan-sync-interval");
@@ -780,6 +784,7 @@ async function refreshLanState() {
     lanEncryptEl.checked = s.encrypt_transfer;
     lanAutoSyncEl.checked = s.auto_sync;
     lanAutoAcceptEl.checked = s.auto_accept_pair;
+    lanPairForegroundOnlyEl.checked = s.pair_foreground_only;
     if (!lanLoaded || document.activeElement !== lanSyncIntervalEl)
       lanSyncIntervalEl.value = String(s.auto_sync_interval_secs);
     if (!lanLoaded || document.activeElement !== lanDlDirEl) lanDlDirEl.value = s.download_dir;

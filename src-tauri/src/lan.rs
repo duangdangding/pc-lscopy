@@ -100,6 +100,8 @@ pub struct LanSettings {
     pub auto_sync_interval_secs: u64,
     /// 自动同意配对请求：关闭时（默认）每次配对需在设置页手动确认
     pub auto_accept_pair: bool,
+    /// 仅在打开软件页面时接收配对请求：开启后软件最小化/后台时直接拒收（不做任何动作），请求方收到明确提示
+    pub pair_foreground_only: bool,
     /// 本机设备唯一标识，首次启动生成后固定不变
     pub device_id: String,
     /// 本机设备名，显示在别人的设备列表里
@@ -139,6 +141,7 @@ impl Default for LanSettings {
             auto_sync: false,
             auto_sync_interval_secs: 30,
             auto_accept_pair: false,
+            pair_foreground_only: false,
             device_id: String::new(),
             device_name: String::new(),
             pairing_token: String::new(),
@@ -800,10 +803,15 @@ fn handle_pair(
     client_ip: &str,
 ) {
     // 共享开关必须先开启；配对码校验视「自动同意配对」而定（见下）
-    let (sharing_on, auto_accept, my_token) = {
+    let (sharing_on, auto_accept, my_token, foreground_only) = {
         let state = app.state::<AppState>();
         let s = state.lan.settings.lock().unwrap();
-        (s.sharing, s.auto_accept_pair, s.pairing_token.clone())
+        (
+            s.sharing,
+            s.auto_accept_pair,
+            s.pairing_token.clone(),
+            s.pair_foreground_only,
+        )
     };
     if !sharing_on {
         respond_json(stream, 403, r#"{"error":"sharing_off"}"#);
@@ -835,6 +843,13 @@ fn handle_pair(
     // 后续 /clips / /file 仍走正常配对码鉴权，内容与安卓端协议保持一致
     let ok_body = |token: &str| format!(r#"{{"result":"ok","token":"{token}"}}"#);
 
+    // 仅在打开软件页面时接收配对请求：需要手动确认的配对（未自动同意或被拉黑）在软件后台/最小化时直接拒收，
+    // 请求方会收到明确提示；自动同意配对不受影响
+    let need_confirm = blocked || !auto_accept;
+    if need_confirm && foreground_only && !any_window_in_foreground(app) {
+        respond_json(stream, 409, r#"{"error":"foreground_only"}"#);
+        return;
+    }
     // 自动同意配对：免配对码直接通过（被拉黑设备除外，必须手动确认）
     if !blocked && auto_accept {
         finish(true);
@@ -857,6 +872,13 @@ fn handle_pair(
         Some(false) => respond_json(stream, 409, r#"{"error":"rejected"}"#),
         None => respond_json(stream, 409, r#"{"error":"need_confirm"}"#),
     }
+}
+
+/// 是否有任一窗口处于前台（可见且未最小化）。注意 is_visible 对最小化窗口仍可能返回 true，需同时排除最小化
+fn any_window_in_foreground(app: &AppHandle) -> bool {
+    app.webview_windows().values().any(|w| {
+        w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false)
+    })
 }
 
 /// 配对确认：自动弹出设置窗口并切到「设备同步」页弹窗确认（最多 30 秒），无人应答返回 None
@@ -1020,9 +1042,14 @@ fn handle_clips(
     let state = app.state::<AppState>();
     let my_id = state.lan.settings.lock().unwrap().device_id.clone();
     let db = state.db.lock().unwrap();
+    // 过滤条件（文件记录不同步 + 环回防护）必须在 SQL 里完成：
+    // 若在 LIMIT 之后过滤，"limit=1 且最旧一条恰好是文件"这类情况会把结果滤空，
+    // 请求方拿到的就是 0 条而不是"最旧/最新 1 条有效记录"
     let sql = format!(
         "SELECT id, kind, content, LENGTH(image), created_at, remote_device_id, remote_id
          FROM clips WHERE created_at * 1000 > ?1 AND created_at * 1000 <= ?2
+           AND kind != 'file'
+           AND (remote_device_id IS NULL OR remote_device_id != ?4)
          ORDER BY created_at {} LIMIT ?3",
         if desc { "DESC" } else { "ASC" }
     );
@@ -1033,7 +1060,7 @@ fn handle_clips(
             return;
         }
     };
-    let rows = stmt.query_map(params![since_ms, until_ms, limit], |r| {
+    let rows = stmt.query_map(params![since_ms, until_ms, limit, requester], |r| {
         Ok((
             r.get::<_, i64>(0)?,
             r.get::<_, String>(1)?,
@@ -1048,15 +1075,7 @@ fn handle_clips(
     if let Ok(mapped) = rows {
         for row in mapped.flatten() {
             let (id, kind, content, img_len, created_at, remote_dev, remote_id) = row;
-            // 文件记录是本机路径，对其他设备没有意义，不同步
-            if kind == "file" {
-                continue;
-            }
-            // 环回防护：不回传"本来就来自请求方"的记录
             let origin = remote_dev.clone().unwrap_or_else(|| my_id.clone());
-            if origin == requester {
-                continue;
-            }
             let wire_type = if kind == "image" { WIRE_IMAGE } else { WIRE_TEXT };
             let mut o = json!({
                 "id": id,
@@ -1137,6 +1156,8 @@ pub enum LanErr {
     Rejected,
     /// 对方需要手动确认，但无人应答
     NeedConfirm,
+    /// 对方设置了仅在打开软件页面时接收配对请求，当前处于后台/最小化
+    ForegroundOnly,
     /// 对方已取消与本机的配对
     Unpaired,
     /// 对方把本机加入了黑名单
@@ -1162,6 +1183,7 @@ impl std::fmt::Display for LanErr {
             LanErr::SharingOff => "对方未开启共享".into(),
             LanErr::Rejected => "对方拒绝了配对".into(),
             LanErr::NeedConfirm => "等待对方确认超时".into(),
+            LanErr::ForegroundOnly => "对方仅在打开软件页面时接收配对请求，请对方打开后重试".into(),
             LanErr::Unpaired => "对方已解除配对".into(),
             LanErr::Blocked(_) => "已被对方拉黑".into(),
         };
@@ -1358,7 +1380,9 @@ fn fetch_info(host: &str, port: u16, timeout: Duration) -> Result<Value, LanErr>
     }
 }
 
-/// 拉取记录：since 毫秒下界（不含）；until/limit/desc 为可选扩展（见 handle_clips）
+/// 拉取记录：since 毫秒下界（不含）；until/limit/desc 为可选扩展（见 handle_clips）。
+/// order 参数始终显式携带（asc/desc）：新版安卓服务端以此区分"分页语义"（since/until/
+/// limit 全部生效）和旧版"最近 N 条"语义（limit 忽略水位）；旧服务端忽略未知参数，行为不变
 fn fetch_clips(
     app: &AppHandle,
     device: &LanDevice,
@@ -1375,9 +1399,7 @@ fn fetch_clips(
     if let Some(l) = limit {
         path.push_str(&format!("&limit={l}"));
     }
-    if desc {
-        path.push_str("&order=desc");
-    }
+    path.push_str(if desc { "&order=desc" } else { "&order=asc" });
     let mut resp = http_get(
         app,
         &host,
@@ -1427,6 +1449,7 @@ fn request_pair(app: &AppHandle, device: &LanDevice) -> Result<Option<String>, L
                 .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(|s| s.to_string()));
             match err.as_deref() {
                 Some("rejected") => Err(LanErr::Rejected),
+                Some("foreground_only") => Err(LanErr::ForegroundOnly),
                 _ => Err(LanErr::NeedConfirm),
             }
         }
@@ -1852,8 +1875,10 @@ fn sync_device_inner(
                     if len < expected {
                         break;
                     }
+                    // 游标必须严格前进：旧版安卓服务端会忽略 since（limit>0 时按"最近N条"
+                    // 旧语义返回），每页内容相同，若游标不前进会死循环
                     match max_ts {
-                        Some(ts) if ts > cursor => cursor = ts - 1,
+                        Some(ts) if ts - 1 > cursor => cursor = ts - 1,
                         _ => break,
                     }
                     page = fetch_page(
@@ -1900,17 +1925,16 @@ fn sync_device_inner(
                     Some(CLIPS_PAGE_LIMIT),
                     false,
                 )?;
-                let len = page.len();
                 let max_ts = page
                     .iter()
                     .filter_map(|o| o.get("timestamp").and_then(|v| v.as_i64()))
                     .max();
                 pages.push(page);
-                if len < CLIPS_PAGE_LIMIT as usize {
-                    break;
-                }
+                // 空页或游标停滞才结束：旧服务端可能在 LIMIT 之后才过滤（文件/环回记录），
+                // 页不满不代表已到尾页；旧安卓服务端忽略 since 时每页内容相同，
+                // 靠游标停滞检测退出，防止死循环
                 match max_ts {
-                    Some(ts) if ts > cursor => cursor = ts - 1,
+                    Some(ts) if ts - 1 > cursor => cursor = ts - 1,
                     _ => break,
                 }
             }
@@ -2243,6 +2267,8 @@ pub struct LanStateDto {
     encrypt_transfer: bool,
     auto_sync: bool,
     auto_accept_pair: bool,
+    /// 仅在打开软件页面时接收配对请求
+    pair_foreground_only: bool,
     /// 自动同步间隔（秒）
     auto_sync_interval_secs: u64,
     /// 文件存储路径（空串 = 未设置，仅同步文字）
@@ -2327,6 +2353,7 @@ fn build_state_dto(state: &AppState) -> LanStateDto {
         encrypt_transfer: s.encrypt_transfer,
         auto_sync: s.auto_sync,
         auto_accept_pair: s.auto_accept_pair,
+        pair_foreground_only: s.pair_foreground_only,
         auto_sync_interval_secs: s.auto_sync_interval_secs,
         download_dir: s.download_dir.clone().unwrap_or_default(),
         max_file_mb: s.max_file_mb,
@@ -2354,6 +2381,7 @@ pub struct LanSettingsPatch {
     encrypt_transfer: Option<bool>,
     auto_sync: Option<bool>,
     auto_accept_pair: Option<bool>,
+    pair_foreground_only: Option<bool>,
     auto_sync_interval_secs: Option<u64>,
     device_name: Option<String>,
     server_port: Option<u16>,
@@ -2393,6 +2421,9 @@ pub fn lan_update_settings(
         }
         if let Some(v) = patch.auto_accept_pair {
             s.auto_accept_pair = v;
+        }
+        if let Some(v) = patch.pair_foreground_only {
+            s.pair_foreground_only = v;
         }
         if let Some(name) = patch.device_name {
             let name = name.trim().to_string();
