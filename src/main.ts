@@ -2,8 +2,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { applyAppearance, AppConfig, DEFAULT_HOTKEY, formatHotkey, isMac, loadConfig } from "./config";
-import { confirmDialog } from "./confirm";
+import { applyAppearance, AppConfig, DEFAULT_HOTKEY, formatHotkey, isMac, loadConfig, watchTabsFade } from "./config";
+import { alertDialog, confirmDialog } from "./confirm";
+import { icons } from "./icons";
 import { autoCheckEnabled, checkUpdate } from "./updater";
 
 interface Clip {
@@ -22,12 +23,18 @@ const emptyEl = document.querySelector<HTMLDivElement>("#empty")!;
 const searchEl = document.querySelector<HTMLInputElement>("#search")!;
 const hintEl = document.querySelector<HTMLDivElement>("#hint")!;
 const tabsEl = document.querySelector<HTMLElement>("#tabs")!;
+// 标签过多溢出时，右侧渐变遮罩提示可横向滚动
+watchTabsFade(tabsEl);
 
 let keyword = "";
 let searchTimer: number | undefined;
 let clips: Clip[] = [];
 let selected = 0;
 let config: AppConfig | null = null;
+// 上次渲染的内容签名（id + 置顶态）：唤起面板时若内容没变，直接渲染不播入场动画，避免闪一下
+let lastRenderSig = "";
+// 面板唤起时置位：下一次 refresh 且内容有变化才播交错入场
+let animateOnNextRender = false;
 
 // ---------- 类型标签页：全部 / 图片 / 视频 / 文字 / 办公 / 其他 ----------
 // 分类由后端 category 字段给出："text" 纯文本 | "image" 图片 | "video" 视频 | "office" 办公/文本文件 | "file" 其他文件
@@ -54,6 +61,36 @@ tabsEl.querySelectorAll<HTMLButtonElement>(".tab").forEach((btn) => {
     refresh();
   };
 });
+
+// ---------- 标签页数量徽标：显示当前搜索条件下各类型的记录数 ----------
+function updateTabCounts(all: Clip[]) {
+  const counts: Record<TabKey, number> = {
+    all: all.length,
+    image: 0,
+    video: 0,
+    text: 0,
+    office: 0,
+    other: 0,
+  };
+  for (const c of all) {
+    if (c.category === "image") counts.image++;
+    else if (c.category === "video") counts.video++;
+    else if (c.category === "text") counts.text++;
+    else if (c.category === "office") counts.office++;
+    else counts.other++;
+  }
+  tabsEl.querySelectorAll<HTMLButtonElement>(".tab").forEach((btn) => {
+    const key = (btn.dataset.tab as TabKey) || "all";
+    const n = counts[key] ?? 0;
+    let badge = btn.querySelector<HTMLSpanElement>(".tab-count");
+    if (!badge) {
+      badge = document.createElement("span");
+      badge.className = "tab-count";
+      btn.appendChild(badge);
+    }
+    badge.textContent = n > 0 ? String(n) : "";
+  });
+}
 
 // ---------- 图片缩略图懒加载：进入可视区域才取回数据，带缓存 ----------
 const imageCache = new Map<number, string>();
@@ -103,8 +140,14 @@ function updateHint() {
     : `↑↓ 选择 · Enter 粘贴 · Esc 清空/关闭 · 右键仅复制 · ${hk} 呼出/隐藏`;
 }
 
-// 空列表提示中的复制快捷键按平台显示（mac 为 ⌘C）
-emptyEl.textContent = `暂无记录，复制点什么试试 (${isMac ? "⌘C" : "Ctrl+C"})`;
+// 空列表提示：无搜索词时引导复制（快捷键按平台显示，mac 为 ⌘C），有搜索词时提示无匹配
+function updateEmpty() {
+  const kw = keyword.trim();
+  emptyEl.classList.toggle("search-empty", !!kw);
+  emptyEl.textContent = kw
+    ? `没有找到包含「${kw}」的记录`
+    : `暂无记录，复制点什么试试 (${isMac ? "⌘C" : "Ctrl+C"})`;
+}
 
 // ---------- 面板钉住：钉住后失焦/粘贴都不自动隐藏 ----------
 const pinBtn = document.querySelector<HTMLButtonElement>("#btn-pin")!;
@@ -165,8 +208,15 @@ async function refresh(keepSelection = false) {
     keyword: keyword.trim() || null,
   });
   clips = all.filter(matchTab);
+  updateTabCounts(all);
   emptyEl.style.display = clips.length ? "none" : "block";
+  updateEmpty();
   listEl.innerHTML = "";
+  // 内容没变不播动画；有变化才在本次渲染播交错入场
+  const sig = clips.map((c) => `${c.id}:${c.pinned ? 1 : 0}`).join(",");
+  const animate = animateOnNextRender && sig !== lastRenderSig && clips.length > 0;
+  animateOnNextRender = false;
+  lastRenderSig = sig;
   if (!keepSelection) selected = 0;
   if (selected >= clips.length) selected = Math.max(0, clips.length - 1);
 
@@ -213,14 +263,14 @@ async function refresh(keepSelection = false) {
     if (c.url) {
       const web = document.createElement("button");
       web.className = "clip-web";
-      web.textContent = "🌐";
+      web.innerHTML = icons.globe;
       web.title = `用默认浏览器打开: ${c.url}`;
       web.onclick = async (e) => {
         e.stopPropagation();
         try {
           await openUrl(c.url!);
         } catch (err) {
-          alert(`打开网址失败: ${err}`);
+          alertDialog(`打开网址失败: ${err}`);
         }
       };
       actions.appendChild(web);
@@ -228,7 +278,7 @@ async function refresh(keepSelection = false) {
 
     const view = document.createElement("button");
     view.className = "clip-view";
-    view.textContent = "👁";
+    view.innerHTML = icons.eye;
     view.title =
       c.kind === "image"
         ? "用看图软件打开"
@@ -240,13 +290,13 @@ async function refresh(keepSelection = false) {
       try {
         await invoke("open_clip_with_system", { id: c.id });
       } catch (err) {
-        alert(`打开失败: ${err}`);
+        alertDialog(`打开失败: ${err}`);
       }
     };
 
     const pin = document.createElement("button");
     pin.className = "clip-pin" + (c.pinned ? " active" : "");
-    pin.textContent = "📌";
+    pin.innerHTML = icons.pin;
     pin.title = c.pinned ? "取消置顶" : "置顶（排到最前）";
     pin.onclick = async (e) => {
       e.stopPropagation();
@@ -256,7 +306,7 @@ async function refresh(keepSelection = false) {
 
     const del = document.createElement("button");
     del.className = "clip-del";
-    del.textContent = "✕";
+    del.innerHTML = icons.x;
     del.title = "删除此条";
     del.onclick = async (e) => {
       e.stopPropagation();
@@ -289,6 +339,12 @@ async function refresh(keepSelection = false) {
 
     listEl.appendChild(item);
   });
+
+  // 交错入场动画只作用于本次渲染，播完即移除，不影响后续增量刷新
+  if (animate) {
+    listEl.classList.add("animate-in");
+    window.setTimeout(() => listEl.classList.remove("animate-in"), 600);
+  }
 
   applySelection();
 }
@@ -342,6 +398,8 @@ listen("clip-added", () => refresh(true));
 listen("panel-shown", () => {
   searchEl.value = "";
   keyword = "";
+  // 标记下一次刷新可播入场动画；refresh 里会比对内容签名，没变则不播
+  animateOnNextRender = true;
   refresh();
   searchEl.focus();
 });

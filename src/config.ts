@@ -83,3 +83,19 @@ export function applyAppearance(cfg: AppConfig) {
   );
   root.style.setProperty("--app-font-size", `${cfg.font_size || 14}px`);
 }
+
+/**
+ * 标签栏右侧渐变遮罩：标签过多溢出可横向滚动时，右缘淡出提示还有更多。
+ * 要求 nav 外层包一个 .tabs-wrap 容器；滚动 / 尺寸变化（含字号调整）时自动更新。
+ */
+export function watchTabsFade(nav: HTMLElement) {
+  const wrap = nav.parentElement;
+  if (!wrap || !wrap.classList.contains("tabs-wrap")) return;
+  const update = () => {
+    const more = nav.scrollWidth - nav.clientWidth - nav.scrollLeft > 4;
+    wrap.classList.toggle("scrollable", more);
+  };
+  new ResizeObserver(update).observe(nav);
+  nav.addEventListener("scroll", update);
+  update();
+}

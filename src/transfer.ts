@@ -3,7 +3,8 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open } from "@tauri-apps/plugin-dialog";
 import { applyAppearance, loadConfig } from "./config";
-import { choiceDialog } from "./confirm";
+import { alertDialog, choiceDialog, confirmDialog } from "./confirm";
+import { icons } from "./icons";
 
 const $ = <T extends HTMLElement>(sel: string) => document.querySelector<T>(sel)!;
 
@@ -175,10 +176,10 @@ async function sendPaths(paths: string[], target: { deviceId?: string; ip?: stri
     if (msg.startsWith("已发送")) {
       showResultToast(msg); // 全部成功：30s 后自动关闭
     } else {
-      alert(msg); // 有失败：保留手动关闭，避免错过错误信息
+      alertDialog(msg); // 有失败：保留手动关闭，避免错过错误信息
     }
   } catch (e) {
-    alert(`发送失败: ${e}`);
+    alertDialog(`发送失败: ${e}`);
   } finally {
     sending = false;
     pickBtn.disabled = false;
@@ -285,7 +286,7 @@ function renderHistory(items: TransferDto[]) {
         try {
           await invoke("transfer_reveal", { path: t.path });
         } catch (e) {
-          alert(String(e));
+          alertDialog(String(e));
         }
       };
       actions.appendChild(openBtn);
@@ -334,52 +335,33 @@ async function refreshHistory() {
 
 // ---------- 接收确认（手动模式） ----------
 
-// 接收/拒绝 弹窗（confirmDialog 按钮文案固定为 确定/取消，这里需要 接收/拒绝）
-function recvConfirmDialog(message: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    const overlay = document.createElement("div");
-    overlay.className = "confirm-overlay";
-    const box = document.createElement("div");
-    box.className = "confirm-box";
-    const msg = document.createElement("div");
-    msg.className = "confirm-msg";
-    msg.textContent = message;
-    const btns = document.createElement("div");
-    btns.className = "confirm-btns";
-    const reject = document.createElement("button");
-    reject.className = "btn danger";
-    reject.textContent = "拒绝";
-    const accept = document.createElement("button");
-    accept.className = "btn primary";
-    accept.textContent = "接收";
-    const done = (v: boolean) => {
-      overlay.remove();
-      document.removeEventListener("keydown", onKey, true);
-      resolve(v);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Enter") {
-        e.stopPropagation();
-        e.preventDefault();
-        done(true);
-      } else if (e.key === "Escape") {
-        e.stopPropagation();
-        e.preventDefault();
-        done(false);
-      }
-    };
-    reject.onclick = () => done(false);
-    accept.onclick = () => done(true);
-    btns.append(reject, accept);
-    box.append(msg, btns);
-    overlay.appendChild(box);
-    document.body.appendChild(overlay);
-    document.addEventListener("keydown", onKey, true);
-    accept.focus();
-  });
+// 接收确认弹窗的结构化内容：下载图标 + 文件名（加粗）+ 大小 / 来源（次要色）
+function buildRecvBody(req: TransferIncoming): HTMLElement {
+  const body = document.createElement("div");
+  body.className = "recv-body";
+
+  const icon = document.createElement("div");
+  icon.className = "recv-icon";
+  icon.innerHTML = icons.download; // 静态图标字符串，无注入风险
+
+  const info = document.createElement("div");
+  info.className = "recv-info";
+  const file = document.createElement("div");
+  file.className = "recv-file";
+  file.textContent = req.name; // 对端传来的文件名，必须走 textContent 防注入
+  const sub = document.createElement("div");
+  sub.className = "recv-sub";
+  sub.textContent = `${fmtSize(req.size)} · 来自「${req.peer}」（${req.host}）`;
+  const ask = document.createElement("div");
+  ask.className = "recv-sub recv-ask";
+  ask.textContent = "是否接收？";
+  info.append(file, sub, ask);
+
+  body.append(icon, info);
+  return body;
 }
 
-// 多个设备同时发来时排队逐个确认
+// 多个设备同时发来时排队逐个确认（弹窗用统一的 confirmDialog，按钮文案自定义为 接收/拒绝）
 const recvQueue: TransferIncoming[] = [];
 let recvDialogOpen = false;
 
@@ -389,9 +371,11 @@ async function processRecvQueue() {
   if (!req) return;
   recvDialogOpen = true;
   try {
-    const accept = await recvConfirmDialog(
-      `设备「${req.peer}」（${req.host}）想向你发送文件：\n\n${req.name}（${fmtSize(req.size)}）\n\n是否接收？`
-    );
+    const accept = await confirmDialog(buildRecvBody(req), {
+      okText: "接收",
+      cancelText: "拒绝",
+      cancelKind: "danger",
+    });
     await invoke("transfer_respond_recv", { requestId: req.request_id, accept });
   } finally {
     recvDialogOpen = false;
@@ -425,7 +409,7 @@ $("#tf-open-settings").addEventListener("click", () => {
 
 $("#tf-pick").addEventListener("click", () => {
   if (!selectedDeviceId) {
-    alert("请先在上方选择一台要发送到的设备（或输入对方 IP）");
+    alertDialog("请先在上方选择一台要发送到的设备（或输入对方 IP）");
     return;
   }
   pickAndSend({ deviceId: selectedDeviceId });
@@ -434,7 +418,7 @@ $("#tf-pick").addEventListener("click", () => {
 $("#tf-send-ip").addEventListener("click", () => {
   const ip = $<HTMLInputElement>("#tf-manual-ip").value.trim();
   if (!ip) {
-    alert("请先输入对方 IP 地址");
+    alertDialog("请先输入对方 IP 地址");
     $<HTMLInputElement>("#tf-manual-ip").focus();
     return;
   }
@@ -459,7 +443,7 @@ $("#tf-open-dir").addEventListener("click", async () => {
   try {
     await invoke("transfer_open_dir");
   } catch (e) {
-    alert(String(e));
+    alertDialog(String(e));
   }
 });
 
@@ -492,7 +476,7 @@ getCurrentWebviewWindow()
       } else if (ip) {
         sendPaths(e.payload.paths, { ip });
       } else {
-        alert("请先选择一台要发送到的设备（或输入对方 IP）");
+        alertDialog("请先选择一台要发送到的设备（或输入对方 IP）");
       }
     }
   })

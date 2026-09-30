@@ -4,35 +4,41 @@
   box-sizing: border-box;
 }
 
+/* Catppuccin Mocha 深色主题 */
 :root {
-  --bg: #1e1f24;
-  --bg-item: #2a2b32;
-  --bg-item-hover: #35363f;
-  --text: #e8e8ea;
-  --text-dim: #9a9ba3;
-  --accent: #4f8cff;
-  --danger: #e5534b;
-  --border: #3a3b44;
+  --bg: #1e1e2e;
+  --bg-item: #313244;
+  --bg-item-hover: #45475a;
+  --text: #cdd6f4;
+  --text-dim: #a6adc8;
+  --accent: #89b4fa;
+  --accent-text: #11111b;
+  --danger: #f38ba8;
+  --green: #a6e3a1;
+  --border: #3b3c4f;
   --app-font: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
   --app-font-size: 14px;
 }
 
+/* Catppuccin Latte 浅色主题 */
 :root[data-theme="light"] {
-  --bg: #f5f6f8;
+  --bg: #eff1f5;
   --bg-item: #ffffff;
-  --bg-item-hover: #eef1f6;
-  --text: #22242a;
-  --text-dim: #7a7d88;
-  --accent: #2f6fe0;
-  --danger: #d43d35;
-  --border: #dcdfe6;
+  --bg-item-hover: #e6e9ef;
+  --text: #4c4f69;
+  --text-dim: #6c6f85;
+  --accent: #1e66f5;
+  --accent-text: #ffffff;
+  --danger: #d20f39;
+  --green: #40a02b;
+  --border: #dde1e8;
 }
 
 html,
 body {
   height: 100%;
   background: var(--bg);
-  background-image: radial-gradient(ellipse at 50% -20%, rgba(79, 140, 255, 0.08), transparent 60%);
+  background-image: radial-gradient(ellipse at 50% -20%, color-mix(in srgb, var(--accent) 8%, transparent), transparent 60%);
   color: var(--text);
   font-family: var(--app-font);
   font-size: var(--app-font-size);
@@ -42,7 +48,7 @@ body {
 
 :root[data-theme="light"] body,
 :root[data-theme="light"] {
-  background-image: radial-gradient(ellipse at 50% -20%, rgba(47, 111, 224, 0.06), transparent 60%);
+  background-image: radial-gradient(ellipse at 50% -20%, color-mix(in srgb, var(--accent) 8%, transparent), transparent 60%);
 }
 
 .app {
@@ -282,7 +288,7 @@ body {
 .clip-view:hover,
 .clip-web:hover {
   color: var(--accent);
-  background: rgba(79, 140, 255, 0.12);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
 .clip-pin {
@@ -296,7 +302,7 @@ body {
 
 .clip-del:hover {
   color: var(--danger);
-  background: rgba(229, 83, 75, 0.12);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
 }
 
 .empty {
@@ -671,7 +677,7 @@ input[type="radio"] {
 .btn.primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--accent-text);
 }
 
 .btn.primary:hover {
@@ -684,7 +690,7 @@ input[type="radio"] {
 
 .btn.danger:hover {
   border-color: var(--danger);
-  background: rgba(229, 83, 75, 0.12);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
 }
 
 /* ---------- 设置页标签页 ---------- */
@@ -793,8 +799,8 @@ input[type="radio"] {
 }
 
 .lan-dot.online {
-  background: #3fb950;
-  box-shadow: 0 0 6px rgba(63, 185, 80, 0.6);
+  background: var(--green);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--green) 60%, transparent);
 }
 
 .lan-device .lan-meta {
@@ -1013,7 +1019,7 @@ input[type="radio"] {
 }
 
 .tf-arrow.recv {
-  color: #3fb950;
+  color: var(--green);
 }
 
 /* 接收目录展示 */
@@ -1116,4 +1122,316 @@ input[type="radio"] {
   border-radius: 3px;
   background: var(--accent);
   transition: width 0.2s ease;
+}
+
+/* ---------- 按钮禁用态（如设置页「保存设置」无改动时） ---------- */
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn:disabled:hover {
+  border-color: var(--border);
+  filter: none;
+}
+
+.btn:disabled:active {
+  transform: none;
+}
+
+/* 未保存修改提示：用次要色，与保存成功的主题色区分 */
+.save-msg.dirty {
+  color: var(--text-dim);
+}
+
+/* 搜索无结果的空状态：换成放大镜图标 */
+.empty.search-empty::before {
+  content: "🔍";
+}
+
+/* ---------- SVG 图标尺寸（替代 emoji，跨平台一致） ---------- */
+.icon-btn svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+
+.clip-del,
+.clip-pin,
+.clip-view,
+.clip-web {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px 5px;
+}
+
+.clip-actions svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+/* ---------- 开启记录：toggle 开关 ---------- */
+.record-switch input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.switch-track {
+  width: 32px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--bg-item);
+  border: 1px solid var(--border);
+  position: relative;
+  flex-shrink: 0;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.switch-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  transition: transform 0.15s, background 0.15s;
+}
+
+.record-switch input:checked + .switch-track {
+  background: color-mix(in srgb, var(--accent) 25%, var(--bg-item));
+  border-color: var(--accent);
+}
+
+.record-switch input:checked + .switch-track .switch-thumb {
+  transform: translateX(14px);
+  background: var(--accent);
+}
+
+.record-switch input:focus-visible + .switch-track {
+  outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  outline-offset: 1px;
+}
+
+/* ---------- 主面板标签页数量徽标 ---------- */
+.tab-count {
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  background: color-mix(in srgb, var(--text-dim) 14%, transparent);
+  border-radius: 8px;
+  padding: 0 5px;
+  margin-left: 5px;
+  vertical-align: 1px;
+}
+
+.tab.active .tab-count {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.tab-count:empty {
+  display: none;
+}
+
+/* ---------- 标签栏右侧渐变遮罩（可横向滚动提示） ---------- */
+.tabs-wrap {
+  position: relative;
+}
+
+.tabs-wrap::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 1px; /* 不盖住标签栏的下边框 */
+  width: 32px;
+  background: linear-gradient(to right, transparent, var(--bg));
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.tabs-wrap.scrollable::after {
+  opacity: 1;
+}
+
+/* ---------- 互传：拖拽发送区图标与拖入动画 ---------- */
+.tf-drop {
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.15s ease;
+}
+
+.tf-drop-icon {
+  color: var(--text-dim);
+  transition: color 0.15s ease, transform 0.15s ease;
+}
+
+.tf-drop-icon svg {
+  width: 28px;
+  height: 28px;
+  display: block;
+}
+
+.tf-drop.active {
+  transform: scale(1.01);
+}
+
+.tf-drop.active .tf-drop-icon {
+  color: var(--accent);
+  animation: tf-drop-bounce 0.5s ease;
+}
+
+@keyframes tf-drop-bounce {
+  0% {
+    transform: translateY(0);
+  }
+  40% {
+    transform: translateY(-4px);
+  }
+  100% {
+    transform: translateY(0);
+  }
+}
+
+/* ---------- 互传：接收确认弹窗结构化布局 ---------- */
+.recv-body {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 14px;
+  text-align: left;
+  align-items: flex-start;
+}
+
+.recv-icon {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+}
+
+.recv-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.recv-info {
+  min-width: 0;
+}
+
+.recv-file {
+  font-weight: 600;
+  word-break: break-all;
+  user-select: text;
+}
+
+.recv-sub {
+  color: var(--text-dim);
+  font-size: 12px;
+  margin-top: 4px;
+  user-select: text;
+}
+
+.recv-ask {
+  margin-top: 8px;
+  color: var(--text);
+}
+
+/* ==================== 质感包 ==================== */
+/* 弱边框（变量区）+ 内高光 + 分层阴影 + 回弹动效 + 交错入场 */
+
+:root {
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-spring: cubic-bezier(0.2, 0.9, 0.25, 1.12);
+}
+
+/* 列表卡片与设置卡片：顶部内高光（模拟上方光源）+ 过渡统一 ease-out */
+.clip-item,
+.card {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 1px 2px rgba(0, 0, 0, 0.14);
+  transition: background 0.15s ease-out, border-color 0.15s ease-out,
+    box-shadow 0.2s ease-out, transform 0.15s ease-out;
+}
+
+.clip-item:hover {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 2px 4px rgba(0, 0, 0, 0.2), 0 8px 24px rgba(0, 0, 0, 0.22);
+}
+
+.clip-item.selected {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent),
+    0 8px 24px rgba(0, 0, 0, 0.22);
+}
+
+.card:hover {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 2px 6px rgba(0, 0, 0, 0.12), 0 10px 28px rgba(0, 0, 0, 0.16);
+}
+
+/* 弹窗：更大圆角 + 内高光 + 双层阴影（近实远虚）+ 回弹入场 */
+.confirm-box {
+  border-radius: 14px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    0 2px 8px rgba(0, 0, 0, 0.3), 0 24px 64px rgba(0, 0, 0, 0.45);
+  animation: pop-in 0.22s var(--ease-spring);
+}
+
+/* 按钮/图标/搜索框/标签的过渡统一为 ease-out（快出慢回） */
+.btn,
+.icon-btn,
+#search,
+.tab {
+  transition-timing-function: ease-out;
+}
+
+/* 数字等宽：时间、计数、倒计时变化时不抖动 */
+.clip-meta,
+.tab-count,
+.hint,
+.tf-toast-countdown,
+.lan-sub {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 面板唤起时列表交错入场（main.ts 在 panel-shown 时短暂加 animate-in） */
+.clip-list.animate-in .clip-item {
+  animation: item-in 0.28s var(--ease-out) backwards;
+}
+.clip-list.animate-in .clip-item:nth-child(2) { animation-delay: 25ms; }
+.clip-list.animate-in .clip-item:nth-child(3) { animation-delay: 50ms; }
+.clip-list.animate-in .clip-item:nth-child(4) { animation-delay: 75ms; }
+.clip-list.animate-in .clip-item:nth-child(5) { animation-delay: 100ms; }
+.clip-list.animate-in .clip-item:nth-child(6) { animation-delay: 120ms; }
+.clip-list.animate-in .clip-item:nth-child(n + 7) { animation-delay: 140ms; }
+
+@keyframes item-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+/* 滚动条默认隐身，划过列表才显现（overlay 风格） */
+.clip-list::-webkit-scrollbar-thumb {
+  background: transparent;
+}
+.clip-list:hover::-webkit-scrollbar-thumb {
+  background: var(--border);
+}
+.clip-list::-webkit-scrollbar-thumb:hover {
+  background: var(--text-dim);
+}
+
+/* 工具栏磨砂增强：更高模糊 + 轻微提饱和 */
+.toolbar {
+  backdrop-filter: blur(12px) saturate(1.3);
 }

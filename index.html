@@ -13,11 +13,12 @@
       <header class="toolbar">
         <label class="record-switch" title="关闭后不存储复制的内容">
           <input type="checkbox" id="toggle-enabled" checked />
+          <span class="switch-track"><span class="switch-thumb"></span></span>
           <span>开启记录</span>
         </label>
         <input id="search" type="text" placeholder="搜索剪贴板记录..." autocomplete="off" />
-        <button id="btn-pin" class="icon-btn" title="钉在桌面上（失焦不自动隐藏）">📌</button>
-        <button id="btn-settings" class="icon-btn" title="设置">⚙</button>
+        <button id="btn-pin" class="icon-btn" title="钉在桌面上（失焦不自动隐藏）"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3h6l-1 6 4 4v2H6v-2l4-4z"/><line x1="12" y1="15" x2="12" y2="21"/></svg></button>
+        <button id="btn-settings" class="icon-btn" title="设置"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
       </header>
 
       <div id="update-banner" class="update-banner" hidden>
@@ -25,14 +26,16 @@
         <button id="update-banner-btn" class="btn small">去更新</button>
       </div>
 
-      <nav class="tabs main-tabs" id="tabs">
-        <button class="tab active" data-tab="all">全部</button>
-        <button class="tab" data-tab="image">图片</button>
-        <button class="tab" data-tab="video">视频</button>
-        <button class="tab" data-tab="text">文字</button>
-        <button class="tab" data-tab="office">办公</button>
-        <button class="tab" data-tab="other">其他</button>
-      </nav>
+      <div class="tabs-wrap">
+        <nav class="tabs main-tabs" id="tabs">
+          <button class="tab active" data-tab="all">全部</button>
+          <button class="tab" data-tab="image">图片</button>
+          <button class="tab" data-tab="video">视频</button>
+          <button class="tab" data-tab="text">文字</button>
+          <button class="tab" data-tab="office">办公</button>
+          <button class="tab" data-tab="other">其他</button>
+        </nav>
+      </div>
 
       <div id="list" class="clip-list"></div>
       <div id="empty" class="empty">暂无记录，复制点什么试试 (Ctrl+C)</div>

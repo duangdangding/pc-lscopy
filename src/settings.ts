@@ -4,8 +4,8 @@ import { getVersion } from "@tauri-apps/api/app";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { applyAppearance, AppConfig, DEFAULT_HOTKEY, formatHotkey, isMac, loadConfig } from "./config";
-import { confirmDialog, choiceDialog } from "./confirm";
+import { applyAppearance, AppConfig, DEFAULT_HOTKEY, formatHotkey, isMac, loadConfig, watchTabsFade } from "./config";
+import { alertDialog, confirmDialog, choiceDialog } from "./confirm";
 import { autoCheckEnabled, checkUpdate, resetUpdateCache, setAutoCheckEnabled, UpdateInfo } from "./updater";
 
 const $ = <T extends HTMLElement>(sel: string) =>
@@ -30,6 +30,7 @@ const saveMsgEl = $<HTMLSpanElement>("#save-msg");
 let config: AppConfig;
 
 // ---------- 标签页切换 ----------
+watchTabsFade(document.querySelector<HTMLElement>(".tabs-wrap .tabs")!);
 document.querySelectorAll<HTMLButtonElement>(".tabs .tab").forEach((tab) => {
   tab.onclick = () => {
     document.querySelectorAll(".tabs .tab").forEach((t) => t.classList.remove("active"));
@@ -78,10 +79,12 @@ hotkeyEl.addEventListener("keydown", (e) => {
   }
   parts.push(key);
   hotkeyEl.value = parts.join("+");
+  markDirty();
 });
 
 $("#hotkey-reset").addEventListener("click", () => {
   hotkeyEl.value = DEFAULT_HOTKEY;
+  markDirty();
 });
 
 // 按平台刷新快捷键相关文案（恢复默认按钮 + 说明文字）
@@ -99,20 +102,28 @@ $("#hotkey-reset").addEventListener("click", () => {
 // ---------- 数据库目录 ----------
 $("#db-browse").addEventListener("click", async () => {
   const dir = await open({ directory: true, title: "选择数据库所在目录" });
-  if (typeof dir === "string") dbDirEl.value = dir;
+  if (typeof dir === "string") {
+    dbDirEl.value = dir;
+    markDirty();
+  }
 });
 $("#db-default").addEventListener("click", () => {
   dbDirEl.value = "";
+  markDirty();
 });
 
 // ---------- 配置文件目录 ----------
 const configDirEl = $<HTMLInputElement>("#config-dir");
 $("#config-dir-browse").addEventListener("click", async () => {
   const dir = await open({ directory: true, title: "选择配置文件所在目录" });
-  if (typeof dir === "string") configDirEl.value = dir;
+  if (typeof dir === "string") {
+    configDirEl.value = dir;
+    markDirty();
+  }
 });
 $("#config-dir-default").addEventListener("click", () => {
   configDirEl.value = "";
+  markDirty();
 });
 
 // ---------- 导入 / 导出 ----------
@@ -125,9 +136,9 @@ $("#btn-export").addEventListener("click", async () => {
   if (!path) return;
   try {
     const n = await invoke<number>("export_clips", { path });
-    alert(`已导出 ${n} 条记录到:\n${path}`);
+    alertDialog(`已导出 ${n} 条记录到:\n${path}`);
   } catch (e) {
-    alert(`导出失败: ${e}`);
+    alertDialog(`导出失败: ${e}`);
   }
 });
 
@@ -139,10 +150,10 @@ $("#btn-import").addEventListener("click", async () => {
   if (typeof path !== "string") return;
   try {
     const n = await invoke<number>("import_clips", { path });
-    alert(`已导入 ${n} 条记录`);
+    alertDialog(`已导入 ${n} 条记录`);
     refreshDbInfo();
   } catch (e) {
-    alert(`导入失败: ${e}`);
+    alertDialog(`导入失败: ${e}`);
   }
 });
 
@@ -185,13 +196,13 @@ $("#btn-del-between").addEventListener("click", async () => {
   const startVal = $<HTMLInputElement>("#del-start").value;
   const endVal = $<HTMLInputElement>("#del-end").value;
   if (!startVal || !endVal) {
-    alert("请选择开始和结束时间");
+    alertDialog("请选择开始和结束时间");
     return;
   }
   const start = Math.floor(new Date(startVal).getTime() / 1000);
   const end = Math.floor(new Date(endVal).getTime() / 1000);
   if (start > end) {
-    alert("开始时间不能晚于结束时间");
+    alertDialog("开始时间不能晚于结束时间");
     return;
   }
   const pinnedCount = await invoke<number>("count_pinned_between", { start, end });
@@ -262,7 +273,7 @@ let lanLoaded = false;
 
 // 开关即时生效（不走底部"保存设置"按钮）
 function lanPatch(patch: Record<string, unknown>) {
-  invoke("lan_update_settings", { patch }).catch((e) => alert(`设置失败: ${e}`));
+  invoke("lan_update_settings", { patch }).catch((e) => alertDialog(`设置失败: ${e}`));
 }
 
 lanDiscoverableEl.onchange = () => lanPatch({ discoverable: lanDiscoverableEl.checked });
@@ -276,7 +287,7 @@ const lanSyncIntervalEl = $<HTMLInputElement>("#lan-sync-interval");
 lanSyncIntervalEl.onchange = () => {
   const secs = Math.floor(Number(lanSyncIntervalEl.value));
   if (!Number.isFinite(secs) || secs < 5 || secs > 3600) {
-    alert("同步间隔范围 5–3600 秒");
+    alertDialog("同步间隔范围 5–3600 秒");
     return;
   }
   lanPatch({ auto_sync_interval_secs: secs });
@@ -308,7 +319,7 @@ $("#lan-dl-dir-clear").addEventListener("click", async () => {
 lanMaxFileEl.onchange = () => {
   const mb = Math.floor(Number(lanMaxFileEl.value));
   if (!Number.isFinite(mb) || mb < 1) {
-    alert("大小上限最小为 1 MB");
+    alertDialog("大小上限最小为 1 MB");
     return;
   }
   lanPatch({ max_file_mb: Math.min(mb, 1024) });
@@ -326,7 +337,7 @@ $("#lan-name-save").addEventListener("click", () => {
 $("#lan-port-save").addEventListener("click", () => {
   const port = Number(lanPortEl.value) || 8765;
   if (port < 1024 || port > 65535) {
-    alert("端口范围 1024-65535");
+    alertDialog("端口范围 1024-65535");
     return;
   }
   lanPatch({ server_port: port });
@@ -382,7 +393,7 @@ $("#lan-add-ip").addEventListener("click", async () => {
     ipEl.value = "";
     refreshLanState();
   } else {
-    alert("未找到设备：请确认对方应用已启动且开启了「可被发现」");
+    alertDialog("未找到设备：请确认对方应用已启动且开启了「可被发现」");
   }
 });
 
@@ -430,7 +441,7 @@ function pairForm(device: LanDeviceDto): HTMLElement {
       pairingDraft = "";
       refreshLanState();
     } catch (e) {
-      alert(`配对失败: ${e}`);
+      alertDialog(`配对失败: ${e}`);
       ok.disabled = false;
       ok.textContent = "确定";
     }
@@ -680,7 +691,7 @@ function renderLanDevices(devices: LanDeviceDto[]) {
             pairingDraft = "";
             renderLanDevices(lastDevices);
           } else {
-            alert(`配对失败: ${e}`);
+            alertDialog(`配对失败: ${e}`);
           }
         }
       };
@@ -695,9 +706,9 @@ function renderLanDevices(devices: LanDeviceDto[]) {
           sync.disabled = true;
           try {
             const msg = await invoke<string>("lan_sync_now", { deviceId: d.device_id, mode });
-            alert(msg);
+            alertDialog(msg);
           } catch (e) {
-            alert(`同步失败: ${e}`);
+            alertDialog(`同步失败: ${e}`);
           }
           refreshLanState();
         };
@@ -837,7 +848,7 @@ markRelayDirty(relayKeyEl, "key");
 markRelayDirty(relayGkeyEl, "gkey");
 
 function relayPatch(patch: Record<string, unknown>) {
-  invoke("relay_update_settings", { patch }).catch((e) => alert(`设置失败: ${e}`));
+  invoke("relay_update_settings", { patch }).catch((e) => alertDialog(`设置失败: ${e}`));
 }
 
 // 开关即时生效；地址/分组/密钥走「保存并连接」一次提交
@@ -917,6 +928,26 @@ async function refreshDbInfo() {
 $("#db-info-refresh").addEventListener("click", refreshDbInfo);
 
 // ---------- 保存 ----------
+// 脏状态跟踪：以下字段都走「保存设置」一次提交，有改动才点亮按钮并提示
+const saveBtn = $<HTMLButtonElement>("#btn-save");
+
+function markDirty() {
+  saveBtn.disabled = false;
+  saveMsgEl.classList.add("dirty");
+  saveMsgEl.textContent = "● 有未保存的修改";
+}
+
+[
+  hotkeyEl, enabledEl, autostartEl, silentStartEl, rememberSizeEl,
+  followCursorMonitorEl, dbDirEl, configDirEl, themeEl, fontFamilyEl,
+  fontSizeEl, maxItemsEl, retentionValueEl, retentionUnitEl, excludeAppsEl,
+].forEach((el) => {
+  el.addEventListener("input", markDirty);
+  el.addEventListener("change", markDirty);
+});
+// 初始无改动，按钮不可用
+saveBtn.disabled = true;
+
 $("#btn-save").addEventListener("click", async () => {
   const nextConfigDir = configDirEl.value.trim() || null;
   // 配置目录有变化时，询问是否把原配置文件迁移过去
@@ -959,12 +990,17 @@ $("#btn-save").addEventListener("click", async () => {
   try {
     await invoke("save_config", { config: next, migrateConfig });
     config = next;
+    saveBtn.disabled = true;
+    saveMsgEl.classList.remove("dirty");
     saveMsgEl.textContent = "✓ 已保存";
-    window.setTimeout(() => (saveMsgEl.textContent = ""), 2000);
+    // 2s 后清除，但若期间又有新改动（dirty 重新置位）则保留提示
+    window.setTimeout(() => {
+      if (!saveMsgEl.classList.contains("dirty")) saveMsgEl.textContent = "";
+    }, 2000);
     refreshDbInfo();
   } catch (e) {
     saveMsgEl.textContent = "";
-    alert(`保存失败: ${e}`);
+    alertDialog(`保存失败: ${e}`);
   }
 });
 
@@ -987,6 +1023,7 @@ function renderFontList(filter: string) {
     div.title = f;
     div.onclick = () => {
       fontFamilyEl.value = f;
+      markDirty();
       closeFontDropdown();
     };
     fontListEl.appendChild(div);
@@ -1022,6 +1059,7 @@ function initFontPicker(fonts: string[]) {
       const first = fontListEl.querySelector<HTMLDivElement>(".font-option");
       if (first) {
         fontFamilyEl.value = first.title;
+        markDirty();
         closeFontDropdown();
       }
     }
