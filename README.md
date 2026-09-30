@@ -12,6 +12,7 @@
 - 面板无边框：工具栏 / 底栏空白处可拖动，右缘 / 下缘 / 右下角可调大小
 - 📌 钉住桌面：失焦 / 粘贴不自动隐藏，可连续粘贴多条
 - 可选「记住窗口大小」：重启后恢复上次调整的长宽
+- 自定义数据库 / 配置文件目录：修改配置目录时可选「保留旧配置副本」「迁移并删除旧文件」或「删除旧文件（不迁移，新目录已有配置则直接采用，没有则生成默认配置）」
 - 多显示器：可选「面板跟随光标所在屏幕」（默认开），唤起后面板显示在光标所在屏幕；已在该屏幕时保持当前位置
 - 系统托盘、开机自启、单实例、静默启动
 
@@ -33,6 +34,7 @@
 
 - 安装版走 Tauri 官方 updater（NSIS 装回原目录）
 - 便携版走自研链路：流式下载 → SHA-256 校验 → 替换 exe 并重启
+- macOS 更新不丢配置：配置会镜像到 Application Support，更新整体替换 .app 后首次启动自动从镜像恢复（含数据库 / 配置文件目录设置），无需重新配置
 
 ### 云端中继同步（M1–M5）
 
@@ -107,7 +109,7 @@ cargo clippy           # lint
 - 构建必须走 Tauri CLI（`bun run tauri build`），不要裸 `cargo build --release`。
 - 版本号需同步修改 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 三处。
 - 推 `v*` tag 触发 `.github/workflows/release.yml`，Windows + macOS 并行构建，产物包含安装包、便携版、macOS dmg / app.tar.gz、updater 签名与 SHA-256 校验文件。
-- 配置统一保存在 `lscopy-config.json`（顶层 `app` + `lan` + `relay` 三键）。默认数据目录：Windows = exe 同目录（便携模式）；macOS = `~/Library/Application Support/com.lsh.lscopy`（更新会整体替换 .app，包内数据每次更新都会丢，故不放包内）。数据库 `lscopy.db` 同目录。
+- 配置统一保存在 `lscopy-config.json`（顶层 `app` + `lan` + `relay` 三键）。默认数据目录：Windows = exe 同目录（便携模式）；macOS = `~/Library/Application Support/com.lsh.lscopy`（更新会整体替换 .app，包内数据每次更新都会丢，故不放包内）。数据库 `lscopy.db` 同目录。自定义配置目录时，配置会额外镜像一份到默认数据目录，配置目录被抹掉（如 mac 更新替换 .app）后启动自动恢复。
 
 ## 环境要求
 

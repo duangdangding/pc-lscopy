@@ -189,7 +189,18 @@ pub(crate) fn persist_config(state: &AppState) -> Result<(), String> {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     let json = serde_json::to_string_pretty(&cf).map_err(|e| e.to_string())?;
-    std::fs::write(&path, json).map_err(|e| e.to_string())
+    std::fs::write(&path, &json).map_err(|e| e.to_string())?;
+    // 镜像一份到默认数据目录：macOS 更新会整体替换 .app，若配置目录被更新抹掉
+    // （如自定义目录选在包内），下次启动可从镜像恢复上次配置（含数据库/配置文件
+    // 目录设置），不用重新配置
+    let mirror = default_data_dir().join("lscopy-config.json");
+    if mirror != path {
+        if let Some(dir) = mirror.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(&mirror, &json);
+    }
+    Ok(())
 }
 
 // ---------- 数据模型 ----------
@@ -1616,7 +1627,7 @@ fn save_config(
     app: AppHandle,
     state: State<AppState>,
     config: AppConfig,
-    migrate_config: bool,
+    config_dir_action: String,
 ) -> Result<(), String> {
     // 0. 开启「记住窗口大小」时，立即把当前面板实际尺寸写入配置
     let mut config = config;
@@ -1638,7 +1649,7 @@ fn save_config(
         *db = conn;
     }
 
-    // 2. 配置文件目录变更：验证新目录可写 → 更新指针 → 切换，按需删除旧文件
+    // 2. 配置文件目录变更：验证新目录可写 → 更新指针 → 切换，按选择处理旧文件
     if old.config_dir != config.config_dir {
         let new_file = effective_config_file(&config);
         if let Some(dir) = new_file.parent() {
@@ -1664,8 +1675,24 @@ fn save_config(
             let _ = std::fs::remove_file(legacy_pointer);
         }
         *state.config_file.lock().unwrap() = new_file.clone();
-        if migrate_config && old_file != new_file {
+        // 「迁移并删除旧文件」与「删除旧文件（不迁移）」都会删掉旧位置的配置文件
+        if config_dir_action != "keep" && old_file != new_file {
             let _ = std::fs::remove_file(&old_file);
+        }
+        // 不迁移：新目录已有配置则直接采用，没有则生成一份全新默认配置；
+        // 表单里本次的其他改动一并丢弃（前端保存后会重新加载设置页）
+        if config_dir_action == "reset" {
+            let raw = std::fs::read_to_string(&new_file).ok();
+            let (mut loaded, lan_settings, relay_settings) = load_config_full(raw.as_deref());
+            // config_dir 以本次指针为准，避免沿用新目录旧文件里记录的目录
+            loaded.config_dir = config.config_dir.clone();
+            // 新配置的数据库目录可能不同：切换数据库连接
+            let db_path = effective_db_path(&loaded);
+            let conn = init_db(&db_path)?;
+            *state.db.lock().unwrap() = conn;
+            *state.lan.settings.lock().unwrap() = lan_settings;
+            *state.relay.settings.lock().unwrap() = relay_settings;
+            config = loaded;
         }
     }
 
@@ -2289,6 +2316,17 @@ pub fn run() {
             // .app，包内数据每次更新都会丢），实际目录由指针文件 lscopy-config-dir.txt
             // 决定（可在设置里自定义）。旧版本配置在系统配置目录：首次启动自动迁移过来
             let config_file = current_config_file();
+            // 配置目录被抹掉时（如 macOS 更新整体替换 .app、自定义目录选在包内），
+            // 从默认数据目录的镜像恢复上次配置，更新后无需重配数据库/配置文件目录
+            if !config_file.exists() {
+                let mirror = default_data_dir().join("lscopy-config.json");
+                if mirror != config_file && mirror.exists() {
+                    if let Some(dir) = config_file.parent() {
+                        let _ = std::fs::create_dir_all(dir);
+                    }
+                    let _ = std::fs::copy(&mirror, &config_file);
+                }
+            }
             if !config_file.exists() {
                 let legacy = app
                     .path()

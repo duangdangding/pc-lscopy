@@ -950,19 +950,23 @@ saveBtn.disabled = true;
 
 $("#btn-save").addEventListener("click", async () => {
   const nextConfigDir = configDirEl.value.trim() || null;
-  // 配置目录有变化时，询问是否把原配置文件迁移过去
-  let migrateConfig = false;
+  // 配置目录有变化时，询问原位置的配置文件如何处理
+  // keep = 迁移并保留旧副本；move = 迁移并删除旧文件；
+  // reset = 不迁移：删掉旧文件，新目录已有配置则直接采用，没有则生成默认配置
+  type ConfigDirAction = "keep" | "move" | "reset";
+  let configDirAction: ConfigDirAction = "keep";
   if (nextConfigDir !== (config.config_dir ?? null)) {
     const choice = await choiceDialog(
       "配置文件目录已修改，原位置的配置文件如何处理？",
       [
         { value: "cancel", text: "取消" },
         { value: "keep", text: "保留旧配置副本" },
-        { value: "move", text: "迁移并删除旧文件", kind: "danger" },
+        { value: "move", text: "迁移并删除旧文件" },
+        { value: "reset", text: "删除旧文件（不迁移）", kind: "danger" },
       ]
     );
     if (choice === null || choice === "cancel") return; // 取消：放弃本次保存
-    migrateConfig = choice === "move";
+    configDirAction = choice as ConfigDirAction;
   }
   const next: AppConfig = {
     hotkey: hotkeyEl.value.trim() || DEFAULT_HOTKEY,
@@ -988,7 +992,14 @@ $("#btn-save").addEventListener("click", async () => {
     follow_cursor_monitor: followCursorMonitorEl.checked,
   };
   try {
-    await invoke("save_config", { config: next, migrateConfig });
+    await invoke("save_config", { config: next, configDirAction });
+    // 「删除旧文件（不迁移）」会改用新目录里的配置，表单内容可能整体变化，重新加载设置页
+    if (configDirAction === "reset") {
+      saveMsgEl.classList.remove("dirty");
+      saveMsgEl.textContent = "✓ 已切换到新目录的配置";
+      window.setTimeout(() => window.location.reload(), 600);
+      return;
+    }
     config = next;
     saveBtn.disabled = true;
     saveMsgEl.classList.remove("dirty");
