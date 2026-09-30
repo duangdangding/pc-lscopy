@@ -2278,6 +2278,32 @@ fn portable_update_apply(app: AppHandle, new_path: String) -> Result<(), String>
     Ok(())
 }
 
+// ---------- 安装版应用内更新（Windows NSIS） ----------
+// 不用官方 updater 静默安装：先把安装包流式下载到系统「下载」目录（好找、可留档），
+// 校验 SHA-256 后由用户确认运行安装程序（NSIS 会装回注册表记录的原目录）。
+// 下载/校验复用便携版的 portable_update_download / portable_update_verify。
+
+/// 安装包的下载目标路径：系统「下载」目录下的安装包文件
+#[tauri::command]
+fn installer_update_path(filename: String) -> Result<String, String> {
+    let dir = dirs::download_dir().ok_or("找不到系统下载目录")?;
+    let path = dir.join(filename);
+    if path.exists() {
+        let _ = std::fs::remove_file(&path);
+    }
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// 运行下载好的 NSIS 安装包并退出本程序（安装程序装回原目录后会重启新版）
+#[tauri::command]
+fn installer_update_run(app: AppHandle, path: String) -> Result<(), String> {
+    std::process::Command::new(&path)
+        .spawn()
+        .map_err(|e| format!("启动安装程序失败: {e}"))?;
+    app.exit(0);
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -2589,6 +2615,8 @@ pub fn run() {
             portable_update_download,
             portable_update_verify,
             portable_update_apply,
+            installer_update_path,
+            installer_update_run,
             http_get_text
         ])
         .run(tauri::generate_context!())

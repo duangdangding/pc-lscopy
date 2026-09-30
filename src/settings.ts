@@ -1206,9 +1206,83 @@ async function portableUpdate(toOtherDir: boolean) {
   }
 }
 
+// 安装版更新（Windows NSIS）：安装包流式下载到系统「下载」目录（好找、可留档），
+// 与 Release 的 sha256sums 比对后询问是否立即运行安装程序（NSIS 装回原目录并重启新版）
+async function installedUpdate() {
+  if (!pendingUpdate) return;
+  const ver = pendingUpdate.version;
+  const base = `https://github.com/duangdangding/pc-lscopy/releases/download/v${ver}`;
+  const filename = `lscopy_${ver}_x64-setup.exe`;
+  doUpdateBtn.hidden = true;
+  checkUpdateBtn.disabled = true;
+  updateProgressEl.hidden = false;
+  const unlisten = await listen<{ sent: number; total: number }>(
+    "portable-update-progress",
+    (e) => {
+      const { sent, total } = e.payload;
+      if (total > 0) {
+        const pct = Math.min(100, Math.round((sent / total) * 100));
+        updateProgressBarEl.style.width = `${pct}%`;
+        updateStatusEl.textContent = `下载中… ${pct}%`;
+      }
+    }
+  );
+  try {
+    const path = await invoke<string>("installer_update_path", { filename });
+    updateStatusEl.textContent = "开始下载更新包…";
+    await invoke("portable_update_download", {
+      url: `${base}/${filename}`,
+      path,
+    });
+    updateProgressBarEl.style.width = "100%";
+
+    // SHA-256 校验（校验文件取不到时跳过并提示，不阻断更新）
+    updateStatusEl.textContent = "校验文件完整性…";
+    try {
+      const sums = await invoke<string>("http_get_text", {
+        url: `${base}/sha256sums-windows.txt`,
+      });
+      const line = sums.split("\n").find((l) => l.includes("_x64-setup.exe"));
+      const expected = line?.trim().split(/\s+/)[0] || "";
+      if (expected) {
+        const ok = await invoke<boolean>("portable_update_verify", {
+          path,
+          expectedSha256: expected,
+        });
+        if (!ok) throw new Error("SHA-256 校验不一致，文件可能损坏，请重试");
+      }
+    } catch (e) {
+      if (String(e).includes("校验不一致")) throw e;
+      updateStatusEl.textContent = "未能获取校验文件，跳过完整性校验。";
+    }
+
+    const runNow = await confirmDialog(
+      `已下载到 ${path}\n\n现在运行安装程序吗？（本软件将退出，安装程序会装回原目录并启动新版）`,
+      { okText: "现在安装", cancelText: "稍后手动安装" }
+    );
+    if (runNow) {
+      await invoke("installer_update_run", { path });
+    } else {
+      await invoke("transfer_reveal", { path });
+      updateStatusEl.textContent = `已下载到 ${path}，双击运行即可安装。`;
+      checkUpdateBtn.disabled = false;
+      doUpdateBtn.hidden = false;
+    }
+  } catch (e) {
+    updateStatusEl.textContent = `更新失败：${e}`;
+    checkUpdateBtn.disabled = false;
+    doUpdateBtn.hidden = false;
+  } finally {
+    unlisten();
+  }
+}
+
 doUpdateBtn.addEventListener("click", async () => {
   if (!pendingUpdate) return;
   if (installKind === "portable") return portableUpdate(false);
+  // Windows 安装版：安装包先下载到系统「下载」目录（好找、可留档），确认后再运行；
+  // macOS 保持官方 updater 流程（静默替换 .app）
+  if (!isMac) return installedUpdate();
 
   doUpdateBtn.hidden = true;
   checkUpdateBtn.disabled = true;
@@ -1265,6 +1339,10 @@ async function initAboutTab() {
       installKindEl.hidden = false;
       installKindEl.textContent =
         "当前为绿色便携版：更新会下载到本程序所在目录，替换旧文件后自动重启，配置和剪贴板记录都保留在原目录。";
+    } else if (!isMac) {
+      installKindEl.hidden = false;
+      installKindEl.textContent =
+        "当前为安装版：更新包会下载到系统「下载」目录，运行安装程序即装回原目录，配置和剪贴板记录不受影响。";
     }
   } catch {
     /* 检测失败按安装版处理 */

@@ -147,13 +147,19 @@ cargo clippy           # lint
   **注意**：`APPLE_*` 签名环境变量未配置时绝不能以空字符串传入 workflow（Tauri CLI 只判断变量存在性），
   需要 macOS 签名时按 SIGNING.md 把 env 行加回。
   - **便携版就地更新**（lib.rs「便携版应用内更新」区）：`update_install_kind` 按注册表
-    Uninstall 项（lscopy / com.lsh.lscopy）区分安装版与便携版。安装版走官方 updater
-    （NSIS 装回原目录）；便携版走自研链路：`portable_update_begin`（目标 = exe 同目录
+    Uninstall 项（lscopy / com.lsh.lscopy）区分安装版与便携版。**Windows 安装版**
+    （lib.rs「安装版应用内更新」区）：不走官方静默 updater——`installer_update_path`
+    把目标定到系统「下载」目录（`dirs::download_dir`，好找、可留档），复用
+    `portable_update_download` / `portable_update_verify` 下载并校验
+    `lscopy_{ver}_x64-setup.exe`，确认后 `installer_update_run` 启动安装包并退出
+    （NSIS 装回原目录并重启新版）；macOS 仍走官方 updater 静默替换 .app。
+    便携版走自研链路：`portable_update_begin`（目标 = exe 同目录
     lscopy_new.exe 或用户指定目录的 lscopy.exe）→ `portable_update_download`（ureq 流式
     下载 + portable-update-progress 事件）→ 与 Release 的 sha256sums-windows.txt 做
     SHA-256 比对（`http_get_text` + `portable_update_verify`）→ `portable_update_apply`
     生成 PowerShell 脚本（UTF-8 BOM 兼容中文路径）等进程退出后替换 exe 并重启。
-    下载 URL 依赖 workflow 的便携版命名约定 `lscopy_v{ver}_x64_portable.exe`，改名要同步 settings.ts。
+    下载 URL 依赖 workflow 的产物命名约定 `lscopy_v{ver}_x64_portable.exe` /
+    `lscopy_{ver}_x64-setup.exe`，改名要同步 settings.ts。
 - **发布流程**（新会话发布按此完整执行）：
   1. 验证：`bun run build` + `cargo check` / `cargo clippy` 全绿；版本号三处已同步。
   2. 提交并推送：`git add -A && git commit` → `git push origin main` → `git tag vX.Y.Z && git push origin vX.Y.Z`。
