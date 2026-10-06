@@ -557,6 +557,23 @@ fn send_one(
     let _ = stream.set_read_timeout(Some(Duration::from_secs(300)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(300)));
 
+    // 注册活动连接（函数结束自动注销）：取消命令可 shutdown 它，中断阻塞中的写/读
+    {
+        let state = app.state::<AppState>();
+        *state.lan.transfer_active.lock().unwrap() = stream.try_clone().ok();
+    }
+    struct ActiveGuard<'a>(&'a AppHandle);
+    impl Drop for ActiveGuard<'_> {
+        fn drop(&mut self) {
+            *self.0.state::<AppState>().lan.transfer_active.lock().unwrap() = None;
+        }
+    }
+    let _guard = ActiveGuard(app);
+
+    // 取消标记：每块检查一次；连接被 shutdown 导致的 IO 错误也归并为「已取消」
+    let is_cancelled =
+        |app: &AppHandle| app.state::<AppState>().lan.transfer_cancel.load(Ordering::SeqCst);
+
     let (my_id, my_name) = {
         let state = app.state::<AppState>();
         let s = state.lan.settings.lock().unwrap();
@@ -586,6 +603,9 @@ fn send_one(
     let mut last_emit = Instant::now() - PROGRESS_INTERVAL;
     let mut buf = vec![0u8; TRANSFER_CHUNK];
     loop {
+        if is_cancelled(app) {
+            return Err(LanErr::Net("已取消发送".into()));
+        }
         let n = file.read(&mut buf).map_err(|e| LanErr::Net(e.to_string()))?;
         if n == 0 {
             break;
@@ -594,9 +614,12 @@ fn send_one(
         if let (Some(t), Some(nn)) = (target.token.as_deref(), nonce) {
             xor_crypt_at(t, nn, chunk_base, chunk);
         }
-        stream
-            .write_all(chunk)
-            .map_err(|e| LanErr::Net(e.to_string()))?;
+        if let Err(e) = stream.write_all(chunk) {
+            if is_cancelled(app) {
+                return Err(LanErr::Net("已取消发送".into()));
+            }
+            return Err(LanErr::Net(e.to_string()));
+        }
         chunk_base += n / 8;
         sent += n as u64;
         emit_progress(
@@ -616,7 +639,16 @@ fn send_one(
     }
     let _ = stream.flush();
 
-    let resp = read_simple_response(&mut stream)?;
+    // 等待对方响应（含手动确认窗口期）：取消命令 shutdown 连接后这里会立即报错
+    let resp = match read_simple_response(&mut stream) {
+        Ok(r) => r,
+        Err(e) => {
+            if is_cancelled(app) {
+                return Err(LanErr::Net("已取消发送".into()));
+            }
+            return Err(e);
+        }
+    };
     match resp.code {
         200 => Ok(sent),
         // 对方是旧版 lscopy 或安卓端（没有 /recv 端点）
@@ -649,8 +681,14 @@ fn send_one(
 fn send_paths_to(app: &AppHandle, target: &SendTarget, paths: Vec<String>) -> String {
     let count = paths.len();
     let mut ok_count = 0usize;
+    let mut cancelled = false;
     let mut failures: Vec<String> = Vec::new();
     for (i, p) in paths.iter().enumerate() {
+        // 用户取消：当前文件已在 send_one 内中断，剩余文件直接跳过
+        if app.state::<AppState>().lan.transfer_cancel.load(Ordering::SeqCst) {
+            cancelled = true;
+            break;
+        }
         let path = PathBuf::from(p);
         let name = path
             .file_name()
@@ -662,8 +700,18 @@ fn send_paths_to(app: &AppHandle, target: &SendTarget, paths: Vec<String>) -> St
         }
         match send_one(app, target, &path, &name, i + 1, count) {
             Ok(_) => ok_count += 1,
-            Err(e) => failures.push(format!("{name}：{e}")),
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("已取消") {
+                    cancelled = true;
+                    break;
+                }
+                failures.push(format!("{name}：{e}"));
+            }
         }
+    }
+    if cancelled {
+        return format!("已取消（成功 {ok_count}/{count} 个）");
     }
     if failures.is_empty() {
         format!("已发送 {ok_count} 个文件到「{}」", target.name)
@@ -681,6 +729,11 @@ pub async fn transfer_send(
     device_id: String,
     paths: Vec<String>,
 ) -> Result<String, String> {
+    // 新一批发送前复位取消标记
+    app.state::<AppState>()
+        .lan
+        .transfer_cancel
+        .store(false, Ordering::SeqCst);
     tauri::async_runtime::spawn_blocking(move || {
         if paths.is_empty() {
             return Err("未选择文件".to_string());
@@ -699,6 +752,10 @@ pub async fn transfer_send_ip(
     ip: String,
     paths: Vec<String>,
 ) -> Result<String, String> {
+    app.state::<AppState>()
+        .lan
+        .transfer_cancel
+        .store(false, Ordering::SeqCst);
     tauri::async_runtime::spawn_blocking(move || {
         if paths.is_empty() {
             return Err("未选择文件".to_string());
@@ -712,6 +769,15 @@ pub async fn transfer_send_ip(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// 取消当前发送批次：中断阻塞中的传输连接，剩余文件跳过
+#[tauri::command]
+pub fn transfer_cancel(state: State<AppState>) {
+    state.lan.transfer_cancel.store(true, Ordering::SeqCst);
+    if let Some(s) = state.lan.transfer_active.lock().unwrap().as_ref() {
+        let _ = s.shutdown(std::net::Shutdown::Both);
+    }
 }
 
 /// 接收确认弹窗的答复

@@ -167,14 +167,17 @@ async function sendPaths(paths: string[], target: { deviceId?: string; ip?: stri
   if (!paths.length) return;
   sending = true;
   const pickBtn = $<HTMLButtonElement>("#tf-pick");
+  const cancelBtn = $<HTMLButtonElement>("#tf-cancel");
   pickBtn.disabled = true;
+  cancelBtn.disabled = false;
+  cancelBtn.textContent = "取消发送";
   showProgress(true);
   try {
     const msg = target.ip
       ? await invoke<string>("transfer_send_ip", { ip: target.ip, paths })
       : await invoke<string>("transfer_send", { deviceId: target.deviceId, paths });
-    if (msg.startsWith("已发送")) {
-      showResultToast(msg); // 全部成功：30s 后自动关闭
+    if (msg.startsWith("已发送") || msg.startsWith("已取消")) {
+      showResultToast(msg); // 全部成功/用户取消：30s 后自动关闭
     } else {
       alertDialog(msg); // 有失败：保留手动关闭，避免错过错误信息
     }
@@ -187,6 +190,14 @@ async function sendPaths(paths: string[], target: { deviceId?: string; ip?: stri
     refreshHistory();
   }
 }
+
+// 取消发送：中断当前连接，剩余文件跳过（已传完的文件不受影响）
+$<HTMLButtonElement>("#tf-cancel").onclick = () => {
+  const cancelBtn = $<HTMLButtonElement>("#tf-cancel");
+  cancelBtn.disabled = true;
+  cancelBtn.textContent = "正在取消…";
+  invoke("transfer_cancel").catch(() => {});
+};
 
 // 发送成功提示：底部 toast，倒计时 30s 自动关闭（可点 × 立即关闭）
 let toastTimer: number | undefined;

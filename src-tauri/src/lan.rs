@@ -100,8 +100,6 @@ pub struct LanSettings {
     pub auto_sync_interval_secs: u64,
     /// 自动同意配对请求：关闭时（默认）每次配对需在设置页手动确认
     pub auto_accept_pair: bool,
-    /// 仅在打开软件页面时接收配对请求：开启后软件最小化/后台时直接拒收（不做任何动作），请求方收到明确提示
-    pub pair_foreground_only: bool,
     /// 本机设备唯一标识，首次启动生成后固定不变
     pub device_id: String,
     /// 本机设备名，显示在别人的设备列表里
@@ -141,7 +139,6 @@ impl Default for LanSettings {
             auto_sync: false,
             auto_sync_interval_secs: 30,
             auto_accept_pair: false,
-            pair_foreground_only: false,
             device_id: String::new(),
             device_name: String::new(),
             pairing_token: String::new(),
@@ -182,6 +179,10 @@ pub struct LanShared {
     pub actual_port: AtomicU64,
     /// 正在同步中的设备 id 集合（UI 显示用）
     pub syncing: Mutex<HashSet<String>>,
+    /// 文件发送取消标记：置位后当前文件中断、剩余文件跳过
+    pub transfer_cancel: AtomicBool,
+    /// 正在发送的连接副本（取消时从命令线程 shutdown，中断阻塞中的写/读）
+    pub transfer_active: Mutex<Option<TcpStream>>,
     /// 「状态变化」事件节流
     last_emit: Mutex<Instant>,
 }
@@ -196,6 +197,8 @@ impl LanShared {
             server_running: AtomicBool::new(false),
             actual_port: AtomicU64::new(0),
             syncing: Mutex::new(HashSet::new()),
+            transfer_cancel: AtomicBool::new(false),
+            transfer_active: Mutex::new(None),
             last_emit: Mutex::new(Instant::now() - Duration::from_secs(10)),
         }
     }
@@ -803,15 +806,10 @@ fn handle_pair(
     client_ip: &str,
 ) {
     // 共享开关必须先开启；配对码校验视「自动同意配对」而定（见下）
-    let (sharing_on, auto_accept, my_token, foreground_only) = {
+    let (sharing_on, auto_accept, my_token) = {
         let state = app.state::<AppState>();
         let s = state.lan.settings.lock().unwrap();
-        (
-            s.sharing,
-            s.auto_accept_pair,
-            s.pairing_token.clone(),
-            s.pair_foreground_only,
-        )
+        (s.sharing, s.auto_accept_pair, s.pairing_token.clone())
     };
     if !sharing_on {
         respond_json(stream, 403, r#"{"error":"sharing_off"}"#);
@@ -843,13 +841,6 @@ fn handle_pair(
     // 后续 /clips / /file 仍走正常配对码鉴权，内容与安卓端协议保持一致
     let ok_body = |token: &str| format!(r#"{{"result":"ok","token":"{token}"}}"#);
 
-    // 仅在打开软件页面时接收配对请求：需要手动确认的配对（未自动同意或被拉黑）在软件后台/最小化时直接拒收，
-    // 请求方会收到明确提示；自动同意配对不受影响
-    let need_confirm = blocked || !auto_accept;
-    if need_confirm && foreground_only && !any_window_in_foreground(app) {
-        respond_json(stream, 409, r#"{"error":"foreground_only"}"#);
-        return;
-    }
     // 自动同意配对：免配对码直接通过（被拉黑设备除外，必须手动确认）
     if !blocked && auto_accept {
         finish(true);
@@ -872,13 +863,6 @@ fn handle_pair(
         Some(false) => respond_json(stream, 409, r#"{"error":"rejected"}"#),
         None => respond_json(stream, 409, r#"{"error":"need_confirm"}"#),
     }
-}
-
-/// 是否有任一窗口处于前台（可见且未最小化）。注意 is_visible 对最小化窗口仍可能返回 true，需同时排除最小化
-fn any_window_in_foreground(app: &AppHandle) -> bool {
-    app.webview_windows().values().any(|w| {
-        w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false)
-    })
 }
 
 /// 配对确认：自动弹出设置窗口并切到「设备同步」页弹窗确认（最多 30 秒），无人应答返回 None
@@ -1156,8 +1140,6 @@ pub enum LanErr {
     Rejected,
     /// 对方需要手动确认，但无人应答
     NeedConfirm,
-    /// 对方设置了仅在打开软件页面时接收配对请求，当前处于后台/最小化
-    ForegroundOnly,
     /// 对方已取消与本机的配对
     Unpaired,
     /// 对方把本机加入了黑名单
@@ -1183,7 +1165,6 @@ impl std::fmt::Display for LanErr {
             LanErr::SharingOff => "对方未开启共享".into(),
             LanErr::Rejected => "对方拒绝了配对".into(),
             LanErr::NeedConfirm => "等待对方确认超时".into(),
-            LanErr::ForegroundOnly => "对方仅在打开软件页面时接收配对请求，请对方打开后重试".into(),
             LanErr::Unpaired => "对方已解除配对".into(),
             LanErr::Blocked(_) => "已被对方拉黑".into(),
         };
@@ -1449,7 +1430,6 @@ fn request_pair(app: &AppHandle, device: &LanDevice) -> Result<Option<String>, L
                 .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(|s| s.to_string()));
             match err.as_deref() {
                 Some("rejected") => Err(LanErr::Rejected),
-                Some("foreground_only") => Err(LanErr::ForegroundOnly),
                 _ => Err(LanErr::NeedConfirm),
             }
         }
@@ -2267,8 +2247,6 @@ pub struct LanStateDto {
     encrypt_transfer: bool,
     auto_sync: bool,
     auto_accept_pair: bool,
-    /// 仅在打开软件页面时接收配对请求
-    pair_foreground_only: bool,
     /// 自动同步间隔（秒）
     auto_sync_interval_secs: u64,
     /// 文件存储路径（空串 = 未设置，仅同步文字）
@@ -2353,7 +2331,6 @@ fn build_state_dto(state: &AppState) -> LanStateDto {
         encrypt_transfer: s.encrypt_transfer,
         auto_sync: s.auto_sync,
         auto_accept_pair: s.auto_accept_pair,
-        pair_foreground_only: s.pair_foreground_only,
         auto_sync_interval_secs: s.auto_sync_interval_secs,
         download_dir: s.download_dir.clone().unwrap_or_default(),
         max_file_mb: s.max_file_mb,
@@ -2381,7 +2358,6 @@ pub struct LanSettingsPatch {
     encrypt_transfer: Option<bool>,
     auto_sync: Option<bool>,
     auto_accept_pair: Option<bool>,
-    pair_foreground_only: Option<bool>,
     auto_sync_interval_secs: Option<u64>,
     device_name: Option<String>,
     server_port: Option<u16>,
@@ -2421,9 +2397,6 @@ pub fn lan_update_settings(
         }
         if let Some(v) = patch.auto_accept_pair {
             s.auto_accept_pair = v;
-        }
-        if let Some(v) = patch.pair_foreground_only {
-            s.pair_foreground_only = v;
         }
         if let Some(name) = patch.device_name {
             let name = name.trim().to_string();

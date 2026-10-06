@@ -2604,6 +2604,7 @@ pub fn run() {
             relay::relay_update_settings,
             lan::transfer::transfer_send,
             lan::transfer::transfer_send_ip,
+            lan::transfer::transfer_cancel,
             lan::transfer::transfer_respond_recv,
             lan::transfer::transfer_history,
             lan::transfer::transfer_delete,
