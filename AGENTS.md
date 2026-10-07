@@ -168,7 +168,10 @@ cargo clippy           # lint
     lscopy_new.exe 或用户指定目录的 lscopy.exe）→ `portable_update_download`（ureq 流式
     下载 + portable-update-progress 事件）→ 与 Release 的 sha256sums-windows.txt 做
     SHA-256 比对（`http_get_text` + `portable_update_verify`）→ `portable_update_apply`
-    生成 PowerShell 脚本（UTF-8 BOM 兼容中文路径）等进程退出后替换 exe 并重启。
+    把自身 exe 拷为 `%TEMP%/lscopy-updater.exe` 并以 `--apply-update <new> <old>` 启动
+    （GUI 子系统无窗口；不再用 PowerShell 脚本——CREATE_NO_WINDOW 在 Windows Terminal
+    为默认终端时仍会弹窗），辅助进程轮询 rename 等旧进程退出后替换 exe 并重启，
+    正常启动时会顺手清理该临时副本。
     下载 URL 依赖 workflow 的产物命名约定 `lscopy_v{ver}_x64_portable.exe` /
     `lscopy_{ver}_x64-setup.exe`，改名要同步 settings.ts。
 - **发布流程**（新会话发布按此完整执行）：

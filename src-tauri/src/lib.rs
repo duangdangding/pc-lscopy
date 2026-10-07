@@ -2544,48 +2544,47 @@ fn portable_update_verify(path: String, expected_sha256: String) -> Result<bool,
     Ok(got.eq_ignore_ascii_case(expected_sha256.trim()))
 }
 
-/// 退出本进程，由 PowerShell 辅助脚本等待退出后替换 exe 并重启新版
+/// 退出本进程，由辅助进程等待退出后替换 exe 并重启新版。
+/// 辅助进程 = 自身 exe 拷到 %TEMP% 的副本：GUI 子系统天然无控制台窗口。
+/// （早期版本用 PowerShell 脚本，powershell.exe 是控制台程序，CREATE_NO_WINDOW
+/// 在 Windows Terminal 作为默认终端时仍会弹窗，故弃用。）
 #[tauri::command]
 fn portable_update_apply(app: AppHandle, new_path: String) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let script = std::env::temp_dir().join("lscopy-update.ps1");
-    let content = concat!(
-        "param([int]$OldPid, [string]$New, [string]$Old)\n",
-        "while (Get-Process -Id $OldPid -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 500 }\n",
-        "Move-Item -Force -LiteralPath $New -Destination $Old\n",
-        "Start-Process -FilePath $Old\n",
-        "Remove-Item -Force -LiteralPath $MyInvocation.MyCommand.Path\n"
-    );
-    // 写 UTF-8 BOM，保证中文路径在 PowerShell 下正确解析
-    std::fs::write(&script, format!("\u{feff}{content}")).map_err(|e| e.to_string())?;
-    let mut cmd = std::process::Command::new("powershell");
-    cmd.args([
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-WindowStyle",
-        "Hidden",
-        "-File",
-    ])
-    .arg(&script)
-    .arg("-OldPid")
-    .arg(std::process::id().to_string())
-    .arg("-New")
-    .arg(&new_path)
-    .arg("-Old")
-    .arg(&exe);
-    // powershell.exe 是控制台程序，仅靠 -WindowStyle Hidden 仍会闪一下黑色控制台窗口；
-    // 用 CREATE_NO_WINDOW 在创建进程时就不分配控制台，彻底避免黑窗一闪而过
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
+    let helper = std::env::temp_dir().join("lscopy-updater.exe");
+    std::fs::copy(&exe, &helper).map_err(|e| format!("创建更新辅助程序失败: {e}"))?;
+    let mut cmd = std::process::Command::new(&helper);
+    cmd.arg("--apply-update").arg(&new_path).arg(&exe);
+    if let Some(dir) = exe.parent() {
+        cmd.current_dir(dir);
     }
-    cmd.spawn()
-        .map_err(|e| format!("启动更新脚本失败: {e}"))?;
+    cmd.spawn().map_err(|e| format!("启动更新辅助程序失败: {e}"))?;
     app.exit(0);
     Ok(())
+}
+
+/// 便携版更新辅助进程入口：等旧进程退出（exe 文件锁释放）后用新 exe 覆盖旧 exe，
+/// 再启动新版。运行在 %TEMP% 的副本上，与替换的源/目标路径都不冲突。
+/// 仅 Windows 便携版使用（macOS 走官方 updater）。
+#[cfg(windows)]
+fn apply_update_helper(new_path: &str, old_path: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        match std::fs::rename(new_path, old_path) {
+            Ok(_) => break,
+            // 旧进程未退出时目标 exe 被占用，rename 失败，稍候重试
+            Err(_) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(400))
+            }
+            // 超时放弃：新 exe 保留在原位，用户可手动替换
+            Err(_) => return,
+        }
+    }
+    let mut cmd = std::process::Command::new(old_path);
+    if let Some(dir) = std::path::Path::new(old_path).parent() {
+        cmd.current_dir(dir);
+    }
+    let _ = cmd.spawn();
 }
 
 // ---------- 安装版应用内更新（Windows NSIS） ----------
@@ -2616,6 +2615,18 @@ fn installer_update_run(app: AppHandle, path: String) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(windows)]
+    {
+        let args: Vec<String> = std::env::args().collect();
+        // 便携版更新辅助进程：--apply-update <new_exe> <old_exe>，跑完即退，
+        // 不进入 Tauri 初始化（避免单实例插件把它拦下）
+        if args.len() >= 4 && args[1] == "--apply-update" {
+            apply_update_helper(&args[2], &args[3]);
+            return;
+        }
+        // 正常启动时顺手清理上次更新遗留的临时辅助程序副本（可能仍被占用，失败无碍）
+        let _ = std::fs::remove_file(std::env::temp_dir().join("lscopy-updater.exe"));
+    }
     tauri::Builder::default()
         // 单实例：重复启动时提示并聚焦已有窗口
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
