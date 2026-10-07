@@ -2344,23 +2344,31 @@ fn portable_update_apply(app: AppHandle, new_path: String) -> Result<(), String>
     );
     // 写 UTF-8 BOM，保证中文路径在 PowerShell 下正确解析
     std::fs::write(&script, format!("\u{feff}{content}")).map_err(|e| e.to_string())?;
-    std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-WindowStyle",
-            "Hidden",
-            "-File",
-        ])
-        .arg(&script)
-        .arg("-OldPid")
-        .arg(std::process::id().to_string())
-        .arg("-New")
-        .arg(&new_path)
-        .arg("-Old")
-        .arg(&exe)
-        .spawn()
+    let mut cmd = std::process::Command::new("powershell");
+    cmd.args([
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-WindowStyle",
+        "Hidden",
+        "-File",
+    ])
+    .arg(&script)
+    .arg("-OldPid")
+    .arg(std::process::id().to_string())
+    .arg("-New")
+    .arg(&new_path)
+    .arg("-Old")
+    .arg(&exe);
+    // powershell.exe 是控制台程序，仅靠 -WindowStyle Hidden 仍会闪一下黑色控制台窗口；
+    // 用 CREATE_NO_WINDOW 在创建进程时就不分配控制台，彻底避免黑窗一闪而过
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd.spawn()
         .map_err(|e| format!("启动更新脚本失败: {e}"))?;
     app.exit(0);
     Ok(())
