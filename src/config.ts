@@ -18,6 +18,7 @@ export interface AppConfig {
   window_width: number; // 记住的窗口宽度（物理像素）
   window_height: number; // 记住的窗口高度（物理像素）
   follow_cursor_monitor: boolean; // 多显示器：唤起时面板跟随光标所在屏幕
+  window_effect: string; // 主面板窗口材质："default" | "acrylic" | "vibrancy" | "mica"
 }
 
 export async function loadConfig(): Promise<AppConfig> {
@@ -82,6 +83,15 @@ export function applyAppearance(cfg: AppConfig) {
     cfg.font_family?.trim() || "Segoe UI, Microsoft YaHei, system-ui, sans-serif"
   );
   root.style.setProperty("--app-font-size", `${cfg.font_size || 14}px`);
+}
+
+/**
+ * 窗口材质效果（亚克力/云母/苹果毛玻璃）：把效果名写到 <html data-effect>，
+ * 面板背景由 styles.css 里对应的半透明规则接管，透出系统材质。
+ * 只在主面板窗口调用——其余窗口不是透明窗口，不需要半透明背景。
+ */
+export function applyWindowEffect(effect: string) {
+  document.documentElement.dataset.effect = effect || "default";
 }
 
 /**

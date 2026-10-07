@@ -49,6 +49,7 @@ pub struct AppConfig {
     pub window_width: u32,       // 记住的窗口宽度（物理像素）
     pub window_height: u32,      // 记住的窗口高度（物理像素）
     pub follow_cursor_monitor: bool, // 多显示器：唤起时面板跟随光标所在屏幕
+    pub window_effect: String,       // 主面板窗口材质："default" | "acrylic" | "vibrancy" | "mica"
 }
 
 /// 默认全局快捷键：全平台统一 Ctrl+`（mac 上即 Control+`）
@@ -93,6 +94,7 @@ impl Default for AppConfig {
             window_width: 420,
             window_height: 640,
             follow_cursor_monitor: true,
+            window_effect: "default".into(),
         }
     }
 }
@@ -1712,7 +1714,80 @@ fn save_config(
     if let Some(item) = state.tray_toggle.lock().unwrap().as_ref() {
         let _ = item.set_checked(config.enabled);
     }
+    // 窗口效果可能随配置整体保存而变化（主题明暗也影响 mica/亚克力配色），立即重应用
+    apply_window_effect_all(&app, &config.window_effect, config.theme != "light");
     let _ = app.emit("config-changed", config);
+    Ok(())
+}
+
+// ---------- 窗口材质效果（亚克力 / 云母 / 苹果毛玻璃） ----------
+
+/// 给全部窗口应用窗口材质效果，可在窗口已显示时调用（立即生效）。
+/// effect: "default" | "acrylic" | "vibrancy" | "mica"；dark 决定材质明暗配色。
+/// 需要窗口在 tauri.conf.json 里开启 transparent，前端配合把背景改为半透明。
+fn apply_window_effect_all(app: &AppHandle, effect: &str, dark: bool) {
+    for label in ["main", "settings", "blocked", "transfer"] {
+        if let Some(win) = app.get_webview_window(label) {
+            apply_window_effect(&win, effect, dark);
+        }
+    }
+}
+
+/// 给单个窗口应用窗口材质效果。
+fn apply_window_effect(win: &tauri::WebviewWindow, effect: &str, dark: bool) {
+    #[cfg(target_os = "windows")]
+    {
+        // 先清掉旧效果再套新的（未应用过时 clear 无害）
+        let _ = window_vibrancy::clear_acrylic(win);
+        let _ = window_vibrancy::clear_mica(win);
+        let _ = window_vibrancy::clear_blur(win);
+        match effect {
+            "acrylic" => {
+                let color = if dark { (28, 28, 44, 140) } else { (240, 241, 245, 140) };
+                let _ = window_vibrancy::apply_acrylic(win, Some(color));
+            }
+            "mica" => {
+                let _ = window_vibrancy::apply_mica(win, Some(dark));
+            }
+            // 「苹果毛玻璃」：Windows 没有 Vibrancy，用 Blur 近似
+            "vibrancy" => {
+                let color = if dark { (22, 22, 34, 110) } else { (239, 241, 245, 110) };
+                let _ = window_vibrancy::apply_blur(win, Some(color));
+            }
+            _ => {} // default：仅清除
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = dark;
+        let _ = window_vibrancy::clear_vibrancy(win);
+        // 亚克力/云母在 mac 上没有对应材质，统一用 Vibrancy 呈现
+        let material = match effect {
+            "acrylic" => Some(window_vibrancy::NSVisualEffectMaterial::Sidebar),
+            "mica" => Some(window_vibrancy::NSVisualEffectMaterial::UnderWindowBackground),
+            "vibrancy" => Some(window_vibrancy::NSVisualEffectMaterial::HudWindow),
+            _ => None,
+        };
+        if let Some(m) = material {
+            let _ = window_vibrancy::apply_vibrancy(win, m, None, Some(10.0));
+        }
+    }
+}
+
+#[tauri::command]
+fn set_window_effect(app: AppHandle, state: State<AppState>, effect: String) -> Result<(), String> {
+    const VALID: [&str; 4] = ["default", "acrylic", "vibrancy", "mica"];
+    if !VALID.contains(&effect.as_str()) {
+        return Err(format!("未知的窗口效果: {effect}"));
+    }
+    let cfg = {
+        let mut c = state.config.lock().unwrap();
+        c.window_effect = effect;
+        c.clone()
+    };
+    persist_config(&state)?;
+    apply_window_effect_all(&app, &cfg.window_effect, cfg.theme != "light");
+    let _ = app.emit("config-changed", cfg);
     Ok(())
 }
 
@@ -2070,6 +2145,19 @@ fn hide_panel_and_yield_focus(app: &AppHandle) {
 #[tauri::command]
 fn hide_panel(app: AppHandle) {
     hide_panel_and_yield_focus(&app);
+}
+
+/// 设置页切换窗口效果时调用：仅把主面板显示出来做实时预览，不抢焦点。
+/// 主面板是 alwaysOnTop，会直接浮在设置窗口上方，用户切换下拉即可实时看到效果。
+#[tauri::command]
+fn show_panel(app: AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        if !win.is_visible().unwrap_or(false) {
+            // 记住当前前台窗口，之后若在面板上粘贴能把焦点还回去
+            *app.state::<AppState>().prev_hwnd.lock().unwrap() = foreground_hwnd();
+            let _ = win.show();
+        }
+    }
 }
 
 fn toggle_window(app: &AppHandle) {
@@ -2475,6 +2563,8 @@ pub fn run() {
                         config.window_height,
                     ));
                 }
+                // 启动时应用配置的窗口材质效果（默认不透明则无操作）
+                apply_window_effect_all(app.handle(), &config.window_effect, config.theme != "light");
                 let w = win.clone();
                 win.on_window_event(move |event| match event {
                     WindowEvent::CloseRequested { api, .. } => {
@@ -2573,6 +2663,8 @@ pub fn run() {
             delete_clip,
             get_config,
             save_config,
+            set_window_effect,
+            show_panel,
             get_db_info,
             export_clips,
             import_clips,

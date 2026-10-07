@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open } from "@tauri-apps/plugin-dialog";
-import { applyAppearance, loadConfig } from "./config";
+import { applyAppearance, applyWindowEffect, AppConfig, loadConfig } from "./config";
 import { alertDialog, choiceDialog, confirmDialog } from "./confirm";
 import { icons } from "./icons";
 
@@ -520,8 +520,16 @@ listen("lan-state-changed", refreshDevices);
 window.setInterval(refreshDevices, 3000);
 window.setInterval(sweepDevices, 10000);
 
+// 主题 / 窗口效果变化时即时同步
+listen<AppConfig>("config-changed", (e) => {
+  applyAppearance(e.payload);
+  applyWindowEffect(e.payload.window_effect);
+});
+
 (async () => {
-  applyAppearance(await loadConfig());
+  const cfg = await loadConfig();
+  applyAppearance(cfg);
+  applyWindowEffect(cfg.window_effect);
   refreshDevices();
   refreshHistory();
   sweepDevices(); // 打开窗口立即扫一轮

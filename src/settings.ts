@@ -4,7 +4,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { applyAppearance, AppConfig, DEFAULT_HOTKEY, formatHotkey, isMac, loadConfig, watchTabsFade } from "./config";
+import { applyAppearance, applyWindowEffect, AppConfig, DEFAULT_HOTKEY, formatHotkey, isMac, loadConfig, watchTabsFade } from "./config";
 import { alertDialog, confirmDialog, choiceDialog } from "./confirm";
 import { autoCheckEnabled, checkUpdate, resetUpdateCache, setAutoCheckEnabled, UpdateInfo } from "./updater";
 
@@ -19,6 +19,7 @@ const rememberSizeEl = $<HTMLInputElement>("#remember-size");
 const followCursorMonitorEl = $<HTMLInputElement>("#follow-cursor-monitor");
 const dbDirEl = $<HTMLInputElement>("#db-dir");
 const themeEl = $<HTMLSelectElement>("#theme");
+const windowEffectEl = $<HTMLSelectElement>("#window-effect");
 const fontFamilyEl = $<HTMLInputElement>("#font-family");
 const fontSizeEl = $<HTMLInputElement>("#font-size");
 const maxItemsEl = $<HTMLInputElement>("#max-items");
@@ -995,6 +996,8 @@ $("#btn-save").addEventListener("click", async () => {
     db_dir: dbDirEl.value.trim() || null,
     config_dir: nextConfigDir,
     theme: themeEl.value,
+    // 窗口效果走独立命令即时生效并即时落盘，这里带上当前值避免被整表保存覆盖
+    window_effect: config.window_effect,
     font_family: fontFamilyEl.value.trim(),
     font_size: Math.max(10, Math.min(24, Number(fontSizeEl.value) || 14)),
     exclude_apps: excludeAppsEl.value
@@ -1100,9 +1103,25 @@ function initFontPicker(fonts: string[]) {
   });
 }
 
+// 窗口效果：不走「保存」按钮，选择后立即生效（后端即时应用材质并落盘），
+// 同时把主面板显示出来做实时预览（alwaysOnTop，浮在设置窗口上方，不抢焦点）
+windowEffectEl.addEventListener("change", async () => {
+  const effect = windowEffectEl.value;
+  try {
+    await invoke("set_window_effect", { effect });
+    config.window_effect = effect;
+    await invoke("show_panel");
+  } catch (e) {
+    alertDialog(`设置窗口效果失败: ${e}`);
+  }
+});
+
 listen<AppConfig>("config-changed", (e) => {
   applyAppearance(e.payload);
+  applyWindowEffect(e.payload.window_effect);
   enabledEl.checked = e.payload.enabled;
+  windowEffectEl.value = e.payload.window_effect || "default";
+  config.window_effect = e.payload.window_effect;
 });
 
 // ---------- 关于 / 版本更新 ----------
@@ -1378,6 +1397,7 @@ listen("open-update-tab", () => {
 (async () => {
   config = await loadConfig();
   applyAppearance(config);
+  applyWindowEffect(config.window_effect);
 
   // 默认数据目录按平台区分：Windows 便携模式 = 程序所在目录；
   // macOS 更新会整体替换 .app，默认在 Application Support
@@ -1395,6 +1415,7 @@ listen("open-update-tab", () => {
   dbDirEl.value = config.db_dir || "";
   configDirEl.value = config.config_dir || "";
   themeEl.value = config.theme;
+  windowEffectEl.value = config.window_effect || "default";
   fontFamilyEl.value = config.font_family;
   fontSizeEl.value = String(config.font_size || 14);
   maxItemsEl.value = String(config.max_items);

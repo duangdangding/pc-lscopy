@@ -1435,3 +1435,46 @@ input[type="radio"] {
 .toolbar {
   backdrop-filter: blur(12px) saturate(1.3);
 }
+
+/* ---------- 窗口材质效果：亚克力 / 云母 / 苹果毛玻璃 ---------- */
+/* 仅主面板窗口（<html data-effect>）生效：整体背景改半透明，透出系统材质。
+   不同效果给不同的不透明度：云母本身带壁纸底色 → 最透；亚克力自带模糊 → 适中 */
+:root[data-effect="acrylic"] {
+  --bg-glass: rgba(30, 30, 46, 0.55);
+  --bg-item-glass: rgba(49, 50, 68, 0.55);
+  --bg-item-hover-glass: rgba(69, 71, 90, 0.65);
+}
+:root[data-effect="vibrancy"] {
+  --bg-glass: rgba(28, 28, 42, 0.35);
+  --bg-item-glass: rgba(49, 50, 68, 0.45);
+  --bg-item-hover-glass: rgba(69, 71, 90, 0.55);
+}
+:root[data-effect="mica"] {
+  --bg-glass: rgba(30, 30, 46, 0.25);
+  --bg-item-glass: rgba(49, 50, 68, 0.4);
+  --bg-item-hover-glass: rgba(69, 71, 90, 0.5);
+}
+:root[data-theme="light"][data-effect="acrylic"] {
+  --bg-glass: rgba(239, 241, 245, 0.6);
+  --bg-item-glass: rgba(255, 255, 255, 0.55);
+  --bg-item-hover-glass: rgba(230, 233, 239, 0.7);
+}
+:root[data-theme="light"][data-effect="vibrancy"] {
+  --bg-glass: rgba(239, 241, 245, 0.4);
+  --bg-item-glass: rgba(255, 255, 255, 0.45);
+  --bg-item-hover-glass: rgba(230, 233, 239, 0.6);
+}
+:root[data-theme="light"][data-effect="mica"] {
+  --bg-glass: rgba(239, 241, 245, 0.3);
+  --bg-item-glass: rgba(255, 255, 255, 0.4);
+  --bg-item-hover-glass: rgba(230, 233, 239, 0.55);
+}
+:root[data-effect]:not([data-effect="default"]) {
+  --bg-item: var(--bg-item-glass);
+  --bg-item-hover: var(--bg-item-hover-glass);
+}
+:root[data-effect]:not([data-effect="default"]),
+:root[data-effect]:not([data-effect="default"]) body {
+  background: var(--bg-glass);
+  background-image: none;
+}

@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { applyAppearance, AppConfig, DEFAULT_HOTKEY, formatHotkey, isMac, loadConfig, watchTabsFade } from "./config";
+import { applyAppearance, applyWindowEffect, AppConfig, DEFAULT_HOTKEY, formatHotkey, isMac, loadConfig, watchTabsFade } from "./config";
 import { alertDialog, confirmDialog } from "./confirm";
 import { icons } from "./icons";
 import { autoCheckEnabled, checkUpdate } from "./updater";
@@ -406,6 +406,7 @@ listen("panel-shown", () => {
 listen<AppConfig>("config-changed", (e) => {
   config = e.payload;
   applyAppearance(config);
+  applyWindowEffect(config.window_effect);
   updateHint();
   toggleEnabledEl.checked = config.enabled;
 });
@@ -422,6 +423,7 @@ document.querySelector<HTMLButtonElement>("#update-banner-btn")!.onclick = async
 (async () => {
   config = await loadConfig();
   applyAppearance(config);
+  applyWindowEffect(config.window_effect);
   panelPinned = await invoke<boolean>("get_panel_pinned");
   applyPinState();
   toggleEnabledEl.checked = config.enabled;

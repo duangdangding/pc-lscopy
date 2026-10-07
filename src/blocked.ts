@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { applyAppearance, loadConfig } from "./config";
+import { applyAppearance, applyWindowEffect, AppConfig, loadConfig } from "./config";
 
 const $ = <T extends HTMLElement>(sel: string) =>
   document.querySelector<T>(sel)!;
@@ -68,8 +68,15 @@ $("#blocked-refresh").addEventListener("click", refresh);
 
 // 其他窗口操作黑名单 / 设备状态时同步刷新
 listen("lan-state-changed", refresh);
+// 主题 / 窗口效果变化时即时同步
+listen<AppConfig>("config-changed", (e) => {
+  applyAppearance(e.payload);
+  applyWindowEffect(e.payload.window_effect);
+});
 
 (async () => {
-  applyAppearance(await loadConfig());
+  const cfg = await loadConfig();
+  applyAppearance(cfg);
+  applyWindowEffect(cfg.window_effect);
   refresh();
 })();
