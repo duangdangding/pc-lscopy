@@ -1388,6 +1388,28 @@ fn simulate_paste_safe(app: &AppHandle) {
     }
 }
 
+// macOS：当前前台 App 是否为访达（Finder）。
+// 桌面/访达窗口没有文本粘贴目标，⌘V 会让访达把剪贴板文本落成「文本剪贴」文件，
+// 粘贴前检测到前台是访达就跳过模拟按键（剪贴板仍已更新，可到目标处手动粘贴）。
+// 用 lsappinfo 查询前台应用的 bundle id，无需额外权限（AppleScript 会弹自动化授权）。
+#[cfg(target_os = "macos")]
+fn frontmost_is_finder() -> bool {
+    let Ok(front) = std::process::Command::new("lsappinfo").arg("front").output() else {
+        return false;
+    };
+    let asn = String::from_utf8_lossy(&front.stdout).trim().to_string();
+    if asn.is_empty() {
+        return false;
+    }
+    let Ok(info) = std::process::Command::new("lsappinfo")
+        .args(["info", "-only", "bundleID", &asn])
+        .output()
+    else {
+        return false;
+    };
+    String::from_utf8_lossy(&info.stdout).contains("com.apple.finder")
+}
+
 // ---------- macOS 辅助功能权限 ----------
 
 /// 本进程是否已有「辅助功能」授权（AXIsProcessTrusted）
@@ -1516,6 +1538,12 @@ fn paste_worker(app: AppHandle) {
         std::thread::sleep(Duration::from_millis(120));
         #[cfg(not(target_os = "macos"))]
         std::thread::sleep(Duration::from_millis(50));
+        // macOS：焦点已还给目标 App，此时前台是访达（桌面/访达窗口）说明没有
+        // 文本粘贴目标，⌘V 会在桌面生成「文本剪贴」文件——跳过模拟按键
+        #[cfg(target_os = "macos")]
+        if frontmost_is_finder() {
+            continue;
+        }
         simulate_paste_safe(&app);
     }
     state.paste_running.store(false, Ordering::SeqCst);

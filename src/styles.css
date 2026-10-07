@@ -1698,3 +1698,41 @@ input[type="radio"] {
 :root[data-bg="on"] .settings-body .settings-footer {
   background: color-mix(in srgb, var(--bg) 70%, transparent);
 }
+
+/* ---------- macOS 无边框面板圆角 ----------
+   Windows 无边框窗口由 DWM 自动加圆角，macOS 没有；前端检测 mac 后给 <html> 加 .mac。
+   注意 body 背景会传播到画布、不受圆角裁切，所以 html/body 背景必须清掉，
+   圆角和背景移到 .app 容器并用 overflow 裁切；固定定位的背景图层（.bg-layer）
+   不受祖先 overflow 裁切，需自带圆角（background 默认按 border-box 裁切，跟随圆角）。
+   用 !important 压过主题/材质规则对 html、body 背景的设置。 */
+html.mac,
+html.mac body {
+  background: transparent !important;
+  background-image: none !important;
+}
+html.mac .app {
+  /* 与后端 Vibrancy 圆角一致（apply_vibrancy 的 Some(10.0)） */
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--bg);
+  background-image: radial-gradient(ellipse at 50% -20%, color-mix(in srgb, var(--accent) 8%, transparent), transparent 60%);
+}
+/* 材质效果（毛玻璃等）：面板用半透明玻璃色，透出窗口材质 */
+html.mac[data-effect]:not([data-effect="default"]) .app {
+  background: var(--bg-glass);
+  background-image: none;
+}
+/* 自定义背景图：面板透明，背景由 .bg-layer 提供（与材质同开时背景图优先，
+   第二个选择器提升特异性压过上面的材质规则） */
+html.mac[data-bg="on"] .app,
+html.mac[data-bg="on"][data-effect] .app {
+  background: transparent;
+  background-image: none;
+}
+html.mac .bg-layer {
+  border-radius: 10px;
+}
+/* 全窗口遮罩（确认弹窗）：固定定位不受 .app 裁切，自带圆角 */
+html.mac .confirm-overlay {
+  border-radius: 10px;
+}

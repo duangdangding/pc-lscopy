@@ -7,6 +7,10 @@ import { alertDialog, confirmDialog } from "./confirm";
 import { icons } from "./icons";
 import { autoCheckEnabled, checkUpdate } from "./updater";
 
+// macOS 无边框窗口没有系统圆角（Windows 由 DWM 自动圆角）：给 <html> 加 .mac，
+// styles.css 据此把面板裁成圆角（与后端 Vibrancy 的 10px 一致）
+if (isMac) document.documentElement.classList.add("mac");
+
 interface Clip {
   id: number;
   kind: string; // "text" | "image" | "file"
