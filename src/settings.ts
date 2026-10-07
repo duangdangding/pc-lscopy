@@ -4,7 +4,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { applyAppearance, applyWindowEffect, AppConfig, BackgroundConfig, DEFAULT_HOTKEY, defaultBackground, formatHotkey, isMac, loadConfig, styleBgLayer, watchTabsFade } from "./config";
+import { applyAppearance, applyWindowEffect, applyWindowBackground, AppConfig, BackgroundConfig, DEFAULT_HOTKEY, defaultBackground, formatHotkey, isMac, loadConfig, styleBgLayer, watchTabsFade } from "./config";
 import { alertDialog, confirmDialog, choiceDialog } from "./confirm";
 import { autoCheckEnabled, checkUpdate, resetUpdateCache, setAutoCheckEnabled, UpdateInfo } from "./updater";
 
@@ -1125,6 +1125,8 @@ listen<AppConfig>("config-changed", (e) => {
   windowEffectEl.value = e.payload.window_effect || "default";
   config.window_effect = e.payload.window_effect;
   config.background = e.payload.background;
+  // 设置窗口背景以当前草稿为准（草稿在 应用/清除/初始化 时与已保存值对齐）
+  applyBgDraftToSelfWindow();
 });
 
 // ---------- 关于 / 版本更新 ----------
@@ -1401,6 +1403,8 @@ listen("open-update-tab", () => {
 const bgEnabledEl = $<HTMLInputElement>("#bg-enabled");
 const bgPickBtn = $<HTMLButtonElement>("#bg-pick");
 const bgClearBtn = $<HTMLButtonElement>("#bg-clear");
+const bgApplySettingsEl = $<HTMLInputElement>("#bg-apply-settings");
+const bgApplyTransferEl = $<HTMLInputElement>("#bg-apply-transfer");
 const bgEditorEl = $<HTMLDivElement>("#bg-editor");
 const bgPreviewLayerEl = $<HTMLDivElement>("#bg-preview-layer");
 const bgModeEl = $<HTMLSelectElement>("#bg-mode");
@@ -1462,6 +1466,12 @@ function rebakeBgPreview() {
 
 function applyBgPreviewStyle() {
   if (bgPreviewB64) styleBgLayer(bgPreviewLayerEl, bgDraft, bgPreviewB64);
+  applyBgDraftToSelfWindow();
+}
+
+/** 草稿实时应用到设置窗口自身（勾选「同时应用到设置窗口」时整窗可见） */
+function applyBgDraftToSelfWindow() {
+  applyWindowBackground(bgDraft, bgDraft.apply_settings, bgPreviewB64 ?? undefined);
 }
 
 /** 选区编辑器里的图片：旋转后的整图（不含选区裁剪） */
@@ -1491,6 +1501,8 @@ function renderRegionRect() {
 /** 控件 ↔ bgDraft 双向同步（控件侧） */
 function syncBgControls() {
   bgEnabledEl.checked = bgDraft.enabled;
+  bgApplySettingsEl.checked = bgDraft.apply_settings;
+  bgApplyTransferEl.checked = bgDraft.apply_transfer;
   bgModeEl.value = bgDraft.mode === "tile" ? "tile" : "stretch";
   const pct = Math.round(Math.max(0.05, Math.min(1, bgDraft.opacity)) * 100);
   bgOpacityEl.value = String(pct);
@@ -1524,6 +1536,16 @@ async function loadBgSource(): Promise<boolean> {
 
 bgEnabledEl.addEventListener("change", () => {
   bgDraft.enabled = bgEnabledEl.checked;
+  applyBgDraftToSelfWindow();
+});
+
+// 应用范围开关：设置窗口立即整窗预览；互传文件窗口在「应用背景」落盘后随 config-changed 生效
+bgApplySettingsEl.addEventListener("change", () => {
+  bgDraft.apply_settings = bgApplySettingsEl.checked;
+  applyBgDraftToSelfWindow();
+});
+bgApplyTransferEl.addEventListener("change", () => {
+  bgDraft.apply_transfer = bgApplyTransferEl.checked;
 });
 
 bgPickBtn.addEventListener("click", async () => {
@@ -1555,6 +1577,7 @@ bgClearBtn.addEventListener("click", async () => {
     bgPreviewLayerEl.style.backgroundImage = "none";
     bgRegionWrapEl.hidden = true;
     syncBgControls();
+    applyBgDraftToSelfWindow();
   } catch (e) {
     alertDialog(`清除背景失败: ${e}`);
   }
@@ -1687,6 +1710,8 @@ async function initBackground() {
     }
   }
   syncBgControls();
+  // 设置窗口自身的背景（按已保存设置的 apply_settings 决定）
+  applyBgDraftToSelfWindow();
 }
 
 (async () => {

@@ -39,6 +39,8 @@ pub struct BackgroundConfig {
     pub opacity: f64,    // 背景图不透明度 0.05 - 1.0
     pub scale_w: f64,    // 图片宽度占面板百分比 5 - 300（100 = 与面板同宽）
     pub scale_h: f64,    // 图片高度占面板百分比 5 - 300（100 = 与面板同高）
+    pub apply_settings: bool, // 背景同时应用到设置窗口
+    pub apply_transfer: bool, // 背景同时应用到互传文件窗口
     pub rotation: i32,   // 旋转角度（0/90/180/270，烘焙进缓存图）
     pub region: Option<BgRegion>, // 归一化选区（基于旋转后的源图），None = 整图
     pub has_image: bool, // 是否已选择图片（源图已入库）
@@ -62,6 +64,8 @@ impl Default for BackgroundConfig {
             opacity: 0.6,
             scale_w: 100.0,
             scale_h: 100.0,
+            apply_settings: false,
+            apply_transfer: false,
             rotation: 0,
             region: None,
             has_image: false,

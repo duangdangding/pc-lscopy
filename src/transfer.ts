@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open } from "@tauri-apps/plugin-dialog";
-import { applyAppearance, applyWindowEffect, AppConfig, loadConfig } from "./config";
+import { applyAppearance, applyWindowEffect, applyWindowBackground, AppConfig, loadConfig } from "./config";
 import { alertDialog, choiceDialog, confirmDialog } from "./confirm";
 import { icons } from "./icons";
 
@@ -524,12 +524,15 @@ window.setInterval(sweepDevices, 10000);
 listen<AppConfig>("config-changed", (e) => {
   applyAppearance(e.payload);
   applyWindowEffect(e.payload.window_effect);
+  // 面板背景图：勾选了「应用到互传文件窗口」才在本窗口生效
+  applyWindowBackground(e.payload.background, e.payload.background?.apply_transfer ?? false);
 });
 
 (async () => {
   const cfg = await loadConfig();
   applyAppearance(cfg);
   applyWindowEffect(cfg.window_effect);
+  applyWindowBackground(cfg.background, cfg.background?.apply_transfer ?? false);
   refreshDevices();
   refreshHistory();
   sweepDevices(); // 打开窗口立即扫一轮

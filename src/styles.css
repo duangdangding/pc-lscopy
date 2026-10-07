@@ -1686,3 +1686,15 @@ input[type="radio"] {
   pointer-events: none;
   display: none;
 }
+
+/* 设置 / 互传文件窗口启用背景（data-bg="on"）时：内容上抬一层，卡片半透明透出背景图 */
+:root[data-bg="on"] .settings-page {
+  position: relative;
+  z-index: 1;
+}
+:root[data-bg="on"] .settings-body .card {
+  background: color-mix(in srgb, var(--bg-item) 80%, transparent);
+}
+:root[data-bg="on"] .settings-body .settings-footer {
+  background: color-mix(in srgb, var(--bg) 70%, transparent);
+}

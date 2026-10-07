@@ -15,6 +15,8 @@ export interface BackgroundConfig {
   opacity: number; // 背景图不透明度 0.05 - 1.0
   scale_w: number; // 图片宽度占面板百分比 5 - 300（100 = 与面板同宽）
   scale_h: number; // 图片高度占面板百分比 5 - 300（100 = 与面板同高）
+  apply_settings: boolean; // 背景同时应用到设置窗口
+  apply_transfer: boolean; // 背景同时应用到互传文件窗口
   rotation: number; // 旋转角度（0/90/180/270，已烘焙进缓存图）
   region: BgRegion | null; // 归一化选区（已烘焙进缓存图），null = 整图
   has_image: boolean; // 是否已选择图片
@@ -81,10 +83,47 @@ export function defaultBackground(): BackgroundConfig {
     opacity: 0.6,
     scale_w: 100,
     scale_h: 100,
+    apply_settings: false,
+    apply_transfer: false,
     rotation: 0,
     region: null,
     has_image: false,
   };
+}
+
+// 当前窗口的背景层（主面板/设置/互传文件共用，懒创建）
+let bgLayerEl: HTMLElement | null = null;
+
+/**
+ * 把背景图应用到当前窗口。
+ * include：该窗口是否在背景应用范围内——主面板恒 true；
+ * 设置/互传文件窗口分别传 bg.apply_settings / bg.apply_transfer。
+ * b64Override：设置页编辑草稿时用未落盘的烘焙图实时预览，不传则读取已保存的缓存图。
+ */
+export async function applyWindowBackground(
+  bg: BackgroundConfig | undefined,
+  include: boolean,
+  b64Override?: string
+) {
+  const on = !!bg && bg.enabled && bg.has_image && include;
+  document.documentElement.dataset.bg = on ? "on" : "off";
+  if (!bgLayerEl) {
+    bgLayerEl = document.createElement("div");
+    bgLayerEl.className = "bg-layer";
+    document.body.prepend(bgLayerEl);
+  }
+  if (!on) {
+    bgLayerEl.style.backgroundImage = "none";
+    return;
+  }
+  const b64 = b64Override ?? (await invoke<string | null>("get_background_cache"));
+  if (!b64) {
+    // 缓存图缺失（如配置目录换过但图片没跟过来）：静默退回无背景
+    document.documentElement.dataset.bg = "off";
+    bgLayerEl.style.backgroundImage = "none";
+    return;
+  }
+  styleBgLayer(bgLayerEl, bg!, b64);
 }
 
 /** 是否 macOS（用于快捷键的显示与默认值） */

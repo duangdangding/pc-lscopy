@@ -109,6 +109,10 @@
             <button id="bg-pick" class="btn">选择图片…</button>
             <button id="bg-clear" class="btn danger" disabled>清除背景</button>
           </div>
+          <div class="row" style="gap: 16px; margin-top: 8px">
+            <label class="check"><input id="bg-apply-settings" type="checkbox" /> 同时应用到设置窗口</label>
+            <label class="check"><input id="bg-apply-transfer" type="checkbox" /> 同时应用到互传文件窗口</label>
+          </div>
           <div id="bg-editor" class="bg-editor-wrap" hidden>
             <!-- 预览：模拟主面板（工具栏 + 标签 + 列表 + 底栏），背景层实时套用当前选项 -->
             <div class="bg-preview">
@@ -187,7 +191,7 @@
               </div>
             </div>
           </div>
-          <p class="desc">选择图片后在上方预览中实时调整：拉伸/平铺、图片宽高百分比、框选区域、透明度、旋转；点「应用背景」后主面板立即生效。平铺模式下宽高百分比决定每块重复单元的大小。动图只取第一帧；与窗口材质同时开启时背景图优先显示。</p>
+          <p class="desc">选择图片后在上方预览中实时调整：拉伸/平铺、图片宽高百分比、框选区域、透明度、旋转；点「应用背景」后立即生效。勾选后背景可同时应用到设置窗口与互传文件窗口。平铺模式下宽高百分比决定每块重复单元的大小。动图只取第一帧；与窗口材质同时开启时背景图优先显示。</p>
         </section>
       </div>
 
