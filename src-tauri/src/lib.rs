@@ -29,6 +29,52 @@ static CLIPBOARD_LOCK: Mutex<()> = Mutex::new(());
 
 // ---------- 配置 ----------
 
+/// 面板背景图设置：选区 / 旋转在设置页用 canvas 烘焙进缓存图（lscopy-bg.png），
+/// 运行时主面板只按 mode + opacity 用 CSS 应用缓存图
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(default)]
+pub struct BackgroundConfig {
+    pub enabled: bool,   // 是否启用面板背景图
+    pub mode: String,    // "stretch" 拉伸铺满 | "tile" 原尺寸平铺
+    pub opacity: f64,    // 背景图不透明度 0.05 - 1.0
+    pub scale_w: f64,    // 图片宽度占面板百分比 5 - 300（100 = 与面板同宽）
+    pub scale_h: f64,    // 图片高度占面板百分比 5 - 300（100 = 与面板同高）
+    pub rotation: i32,   // 旋转角度（0/90/180/270，烘焙进缓存图）
+    pub region: Option<BgRegion>, // 归一化选区（基于旋转后的源图），None = 整图
+    pub has_image: bool, // 是否已选择图片（源图已入库）
+}
+
+/// 背景图选区：归一化坐标（0-1），相对于旋转后的源图
+#[derive(Serialize, Deserialize, Clone, Copy)]
+#[serde(default)]
+pub struct BgRegion {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+impl Default for BackgroundConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: "stretch".into(),
+            opacity: 0.6,
+            scale_w: 100.0,
+            scale_h: 100.0,
+            rotation: 0,
+            region: None,
+            has_image: false,
+        }
+    }
+}
+
+impl Default for BgRegion {
+    fn default() -> Self {
+        Self { x: 0.0, y: 0.0, w: 1.0, h: 1.0 }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(default)]
 pub struct AppConfig {
@@ -50,6 +96,7 @@ pub struct AppConfig {
     pub window_height: u32,      // 记住的窗口高度（物理像素）
     pub follow_cursor_monitor: bool, // 多显示器：唤起时面板跟随光标所在屏幕
     pub window_effect: String,       // 主面板窗口材质："default" | "acrylic" | "vibrancy" | "mica"
+    pub background: BackgroundConfig, // 面板背景图设置
 }
 
 /// 默认全局快捷键：全平台统一 Ctrl+`（mac 上即 Control+`）
@@ -95,6 +142,7 @@ impl Default for AppConfig {
             window_height: 640,
             follow_cursor_monitor: true,
             window_effect: "default".into(),
+            background: BackgroundConfig::default(),
         }
     }
 }
@@ -1677,6 +1725,25 @@ fn save_config(
             let _ = std::fs::remove_file(legacy_pointer);
         }
         *state.config_file.lock().unwrap() = new_file.clone();
+        // 背景图（源图 + 烘焙缓存）跟随配置目录迁移：「保留旧副本」= 复制；
+        // 「迁移并删除」= 复制后删旧；「不迁移」则沿用新目录里已有的背景
+        if config_dir_action != "reset" && old_file != new_file {
+            if let (Some(old_dir), Some(new_dir)) = (old_file.parent(), new_file.parent()) {
+                let mut bg_files = bg_src_files(old_dir);
+                let cache = old_dir.join(BG_CACHE_NAME);
+                if cache.exists() {
+                    bg_files.push(cache);
+                }
+                for f in bg_files {
+                    if let Some(name) = f.file_name() {
+                        let _ = std::fs::copy(&f, new_dir.join(name));
+                        if config_dir_action == "move" {
+                            let _ = std::fs::remove_file(&f);
+                        }
+                    }
+                }
+            }
+        }
         // 「迁移并删除旧文件」与「删除旧文件（不迁移）」都会删掉旧位置的配置文件
         if config_dir_action != "keep" && old_file != new_file {
             let _ = std::fs::remove_file(&old_file);
@@ -1787,6 +1854,153 @@ fn set_window_effect(app: AppHandle, state: State<AppState>, effect: String) -> 
     };
     persist_config(&state)?;
     apply_window_effect_all(&app, &cfg.window_effect, cfg.theme != "light");
+    let _ = app.emit("config-changed", cfg);
+    Ok(())
+}
+
+// ---------- 面板背景图 ----------
+// 源图复制为配置目录下的 lscopy-bg-src.<ext>；设置页烘焙（旋转+选区）后的成品
+// 存为 lscopy-bg.png，主面板直接按 base64 读取应用。换目录时随配置文件一起迁移。
+
+const BG_SRC_STEM: &str = "lscopy-bg-src";
+const BG_CACHE_NAME: &str = "lscopy-bg.png";
+const BG_EXTS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "gif"];
+
+/// 背景图存放目录：跟随当前生效的配置文件所在目录
+fn bg_dir(state: &AppState) -> PathBuf {
+    state
+        .config_file
+        .lock()
+        .unwrap()
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(default_data_dir)
+}
+
+/// 目录下已存在的背景源图（按支持的扩展名枚举）
+fn bg_src_files(dir: &std::path::Path) -> Vec<PathBuf> {
+    BG_EXTS
+        .iter()
+        .map(|e| dir.join(format!("{BG_SRC_STEM}.{e}")))
+        .filter(|p| p.exists())
+        .collect()
+}
+
+#[derive(Serialize)]
+pub struct BgImageData {
+    b64: String,
+    mime: String,
+}
+
+/// 选择背景图：把源图复制进配置目录（换图后旧的烘焙缓存作废）
+#[tauri::command]
+fn import_background_source(state: State<AppState>, path: String) -> Result<(), String> {
+    let src = PathBuf::from(&path);
+    if !src.exists() {
+        return Err(format!("文件不存在: {path}"));
+    }
+    let ext = src
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_lowercase())
+        .unwrap_or_default();
+    if !BG_EXTS.contains(&ext.as_str()) {
+        return Err("仅支持 png / jpg / webp / bmp / gif 图片".into());
+    }
+    let size = std::fs::metadata(&src).map_err(|e| e.to_string())?.len();
+    if size > 30 * 1024 * 1024 {
+        return Err("图片过大（超过 30MB），请换一张".into());
+    }
+    let dir = bg_dir(&state);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    for f in bg_src_files(&dir) {
+        let _ = std::fs::remove_file(f);
+    }
+    let _ = std::fs::remove_file(dir.join(BG_CACHE_NAME));
+    std::fs::copy(&src, dir.join(format!("{BG_SRC_STEM}.{ext}")))
+        .map_err(|e| format!("复制图片失败: {e}"))?;
+    Ok(())
+}
+
+/// 读取背景源图（设置页重新编辑选区/旋转时回显用）
+#[tauri::command]
+fn read_background_source(state: State<AppState>) -> Option<BgImageData> {
+    let dir = bg_dir(&state);
+    let f = bg_src_files(&dir).into_iter().next()?;
+    let bytes = std::fs::read(&f).ok()?;
+    let mime = match f
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_lowercase()
+        .as_str()
+    {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "gif" => "image/gif",
+        _ => return None, // bg_src_files 只枚举已知扩展名，兜底防御
+    };
+    Some(BgImageData {
+        b64: B64.encode(bytes),
+        mime: mime.to_string(),
+    })
+}
+
+/// 保存设置页烘焙后的成品背景图（base64 PNG）
+#[tauri::command]
+fn save_background_cache(state: State<AppState>, b64: String) -> Result<(), String> {
+    let bytes = B64
+        .decode(b64)
+        .map_err(|e| format!("图片数据解码失败: {e}"))?;
+    if bytes.len() > 30 * 1024 * 1024 {
+        return Err("处理后的图片过大".into());
+    }
+    let dir = bg_dir(&state);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join(BG_CACHE_NAME), bytes).map_err(|e| format!("写入背景图失败: {e}"))
+}
+
+/// 主面板读取烘焙后的背景图
+#[tauri::command]
+fn get_background_cache(state: State<AppState>) -> Option<String> {
+    std::fs::read(bg_dir(&state).join(BG_CACHE_NAME))
+        .ok()
+        .map(|b| B64.encode(b))
+}
+
+/// 保存背景图设置（即时落盘 + 广播，与 set_window_effect 同一模式）
+#[tauri::command]
+fn set_background_config(
+    app: AppHandle,
+    state: State<AppState>,
+    bg: BackgroundConfig,
+) -> Result<(), String> {
+    let cfg = {
+        let mut c = state.config.lock().unwrap();
+        c.background = bg;
+        c.clone()
+    };
+    persist_config(&state)?;
+    let _ = app.emit("config-changed", cfg);
+    Ok(())
+}
+
+/// 清除背景图：删除源图与缓存，并重置背景设置为默认
+#[tauri::command]
+fn clear_background_image(app: AppHandle, state: State<AppState>) -> Result<(), String> {
+    let dir = bg_dir(&state);
+    for f in bg_src_files(&dir) {
+        let _ = std::fs::remove_file(f);
+    }
+    let _ = std::fs::remove_file(dir.join(BG_CACHE_NAME));
+    let cfg = {
+        let mut c = state.config.lock().unwrap();
+        c.background = BackgroundConfig::default();
+        c.clone()
+    };
+    persist_config(&state)?;
     let _ = app.emit("config-changed", cfg);
     Ok(())
 }
@@ -2672,6 +2886,12 @@ pub fn run() {
             get_config,
             save_config,
             set_window_effect,
+            import_background_source,
+            read_background_source,
+            save_background_cache,
+            get_background_cache,
+            set_background_config,
+            clear_background_image,
             show_panel,
             get_db_info,
             export_clips,

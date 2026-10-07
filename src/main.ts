@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { applyAppearance, applyWindowEffect, AppConfig, DEFAULT_HOTKEY, formatHotkey, isMac, loadConfig, watchTabsFade } from "./config";
+import { applyAppearance, applyWindowEffect, AppConfig, BackgroundConfig, DEFAULT_HOTKEY, formatHotkey, isMac, loadConfig, styleBgLayer, watchTabsFade } from "./config";
 import { alertDialog, confirmDialog } from "./confirm";
 import { icons } from "./icons";
 import { autoCheckEnabled, checkUpdate } from "./updater";
@@ -31,6 +31,28 @@ let searchTimer: number | undefined;
 let clips: Clip[] = [];
 let selected = 0;
 let config: AppConfig | null = null;
+
+// ---------- 面板背景图：背景层铺在内容（工具栏/列表/底栏）之下 ----------
+const bgLayerEl = document.createElement("div");
+bgLayerEl.className = "bg-layer";
+document.body.prepend(bgLayerEl);
+
+async function applyBackground(bg: BackgroundConfig | undefined) {
+  const on = !!bg && bg.enabled && bg.has_image;
+  document.documentElement.dataset.bg = on ? "on" : "off";
+  if (!on) {
+    bgLayerEl.style.backgroundImage = "none";
+    return;
+  }
+  const b64 = await invoke<string | null>("get_background_cache");
+  if (!b64) {
+    // 缓存图缺失（如配置目录换过但图片没跟过来）：静默退回无背景
+    document.documentElement.dataset.bg = "off";
+    bgLayerEl.style.backgroundImage = "none";
+    return;
+  }
+  styleBgLayer(bgLayerEl, bg!, b64);
+}
 // 上次渲染的内容签名（id + 置顶态）：唤起面板时若内容没变，直接渲染不播入场动画，避免闪一下
 let lastRenderSig = "";
 // 面板唤起时置位：下一次 refresh 且内容有变化才播交错入场
@@ -407,6 +429,7 @@ listen<AppConfig>("config-changed", (e) => {
   config = e.payload;
   applyAppearance(config);
   applyWindowEffect(config.window_effect);
+  applyBackground(config.background);
   updateHint();
   toggleEnabledEl.checked = config.enabled;
 });
@@ -424,6 +447,7 @@ document.querySelector<HTMLButtonElement>("#update-banner-btn")!.onclick = async
   config = await loadConfig();
   applyAppearance(config);
   applyWindowEffect(config.window_effect);
+  applyBackground(config.background);
   panelPinned = await invoke<boolean>("get_panel_pinned");
   applyPinState();
   toggleEnabledEl.checked = config.enabled;

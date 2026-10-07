@@ -1478,3 +1478,211 @@ input[type="radio"] {
   background: var(--bg-glass);
   background-image: none;
 }
+
+/* ---------- 面板背景图 ---------- */
+/* 背景层：铺在窗口底色之上、内容之下；图片本身由设置页烘焙（旋转+选区），
+   这里只负责拉伸/平铺与不透明度 */
+.bg-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-position: center;
+}
+
+/* 启用背景后：内容上抬一层，窗口底色渐变关掉（避免盖在背景图上） */
+:root[data-bg="on"] .app {
+  position: relative;
+  z-index: 1;
+}
+:root[data-bg="on"] .resize-handle {
+  z-index: 2;
+}
+:root[data-bg="on"],
+:root[data-bg="on"] body {
+  background-image: none;
+}
+/* 让背景图能透出到工具栏 / 底栏 / 列表：这些区域改为更透明的底色 */
+:root[data-bg="on"] .toolbar,
+:root[data-bg="on"] .footer {
+  background: color-mix(in srgb, var(--bg-item) 30%, transparent);
+}
+:root[data-bg="on"] .clip-item {
+  background: color-mix(in srgb, var(--bg-item) 72%, transparent);
+}
+:root[data-bg="on"] .clip-item:hover,
+:root[data-bg="on"] .clip-item.selected {
+  background: color-mix(in srgb, var(--bg-item-hover) 82%, transparent);
+}
+:root[data-bg="on"] .empty {
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+}
+
+/* ---------- 设置页：背景图预览与选区编辑器 ---------- */
+.bg-preview {
+  position: relative;
+  width: 264px;
+  height: 380px;
+  flex: none;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--bg);
+  margin: 10px 0;
+}
+.bg-preview-layer {
+  position: absolute;
+  inset: 0;
+  background-position: center;
+}
+.bg-preview-mock {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+/* 预览里的模拟工具栏 / 标签 / 列表项，样式贴近真实面板（含启用背景后的半透明） */
+.bgp-toolbar {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 8px 8px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-item) 30%, transparent);
+}
+.bgp-switch {
+  width: 26px;
+  height: 14px;
+  border-radius: 8px;
+  background: var(--accent);
+  flex: none;
+}
+.bgp-search {
+  flex: 1;
+  height: 18px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-item);
+}
+.bgp-btn {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  background: var(--bg-item);
+  flex: none;
+}
+.bgp-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 6px 8px;
+}
+.bgp-tab {
+  width: 34px;
+  height: 12px;
+  border-radius: 6px;
+  background: var(--bg-item);
+}
+.bgp-tab.active {
+  background: color-mix(in srgb, var(--accent) 40%, var(--bg-item));
+}
+.bgp-list {
+  flex: 1;
+  padding: 2px 8px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow: hidden;
+}
+.bgp-item {
+  height: 40px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-item) 72%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  padding: 7px 9px;
+}
+.bgp-item .bar {
+  height: 8px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--text) 35%, transparent);
+  margin-bottom: 6px;
+}
+.bgp-item .bar.short {
+  width: 55%;
+  height: 6px;
+  margin-bottom: 0;
+  background: color-mix(in srgb, var(--text) 20%, transparent);
+}
+.bgp-footer {
+  padding: 6px 8px;
+  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-item) 30%, transparent);
+}
+.bgp-footer .bar {
+  height: 6px;
+  width: 70%;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--text) 25%, transparent);
+}
+/* 预览与选项并排 */
+.bg-editor-wrap {
+  display: flex;
+  gap: 18px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+.bg-options {
+  flex: 1;
+  min-width: 260px;
+}
+.bg-options .field {
+  margin-bottom: 10px;
+}
+.bg-slider-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.bg-slider-row input[type="range"] {
+  flex: 1;
+  accent-color: var(--accent);
+}
+.bg-slider-val {
+  min-width: 42px;
+  text-align: right;
+  color: var(--text-dim);
+}
+.bg-rotate-row {
+  display: flex;
+  gap: 6px;
+}
+.bg-rotate-row .btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+/* 选区编辑器：在（旋转后的）源图上拖动框选 */
+.bg-region-box {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  cursor: crosshair;
+  user-select: none;
+  margin-top: 8px;
+}
+.bg-region-box img {
+  display: block;
+  max-width: 100%;
+  max-height: 260px;
+  pointer-events: none;
+}
+.bg-region-rect {
+  position: absolute;
+  border: 2px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+  display: none;
+}

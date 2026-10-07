@@ -1,5 +1,25 @@
 import { invoke } from "@tauri-apps/api/core";
 
+/** 背景图选区：归一化坐标（0-1），相对于旋转后的源图 */
+export interface BgRegion {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** 面板背景图设置（与后端 BackgroundConfig 对应） */
+export interface BackgroundConfig {
+  enabled: boolean; // 是否启用面板背景图
+  mode: string; // "stretch" 拉伸铺满 | "tile" 原尺寸平铺
+  opacity: number; // 背景图不透明度 0.05 - 1.0
+  scale_w: number; // 图片宽度占面板百分比 5 - 300（100 = 与面板同宽）
+  scale_h: number; // 图片高度占面板百分比 5 - 300（100 = 与面板同高）
+  rotation: number; // 旋转角度（0/90/180/270，已烘焙进缓存图）
+  region: BgRegion | null; // 归一化选区（已烘焙进缓存图），null = 整图
+  has_image: boolean; // 是否已选择图片
+}
+
 export interface AppConfig {
   hotkey: string;
   autostart: boolean;
@@ -19,6 +39,7 @@ export interface AppConfig {
   window_height: number; // 记住的窗口高度（物理像素）
   follow_cursor_monitor: boolean; // 多显示器：唤起时面板跟随光标所在屏幕
   window_effect: string; // 主面板窗口材质："default" | "acrylic" | "vibrancy" | "mica"
+  background: BackgroundConfig; // 面板背景图设置
 }
 
 export async function loadConfig(): Promise<AppConfig> {
@@ -35,6 +56,35 @@ export async function loadConfig(): Promise<AppConfig> {
     }
   }
   throw lastErr;
+}
+
+/**
+ * 把背景图按设置应用到一个背景层元素上（主面板与设置页预览共用）。
+ * b64 为烘焙后的 PNG base64；mode 决定拉伸（不重复）还是平铺（重复），
+ * scale_w / scale_h 为图片占面板的宽高百分比，opacity 控制不透明度。
+ */
+export function styleBgLayer(el: HTMLElement, bg: BackgroundConfig, b64: string) {
+  el.style.backgroundImage = `url("data:image/png;base64,${b64}")`;
+  el.style.opacity = String(Math.max(0.05, Math.min(1, bg.opacity)));
+  const w = Math.max(5, Math.min(300, bg.scale_w || 100));
+  const h = Math.max(5, Math.min(300, bg.scale_h || 100));
+  el.style.backgroundSize = `${w}% ${h}%`;
+  el.style.backgroundPosition = "center";
+  el.style.backgroundRepeat = bg.mode === "tile" ? "repeat" : "no-repeat";
+}
+
+/** 背景设置的默认值（与后端 BackgroundConfig::default 一致） */
+export function defaultBackground(): BackgroundConfig {
+  return {
+    enabled: false,
+    mode: "stretch",
+    opacity: 0.6,
+    scale_w: 100,
+    scale_h: 100,
+    rotation: 0,
+    region: null,
+    has_image: false,
+  };
 }
 
 /** 是否 macOS（用于快捷键的显示与默认值） */

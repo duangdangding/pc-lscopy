@@ -101,6 +101,94 @@
             </div>
           </label>
         </section>
+
+        <section class="card">
+          <h2>面板背景</h2>
+          <label class="check"><input id="bg-enabled" type="checkbox" /> 启用面板背景图（覆盖工具栏与列表区域）</label>
+          <div class="row" style="margin-top: 8px">
+            <button id="bg-pick" class="btn">选择图片…</button>
+            <button id="bg-clear" class="btn danger" disabled>清除背景</button>
+          </div>
+          <div id="bg-editor" class="bg-editor-wrap" hidden>
+            <!-- 预览：模拟主面板（工具栏 + 标签 + 列表 + 底栏），背景层实时套用当前选项 -->
+            <div class="bg-preview">
+              <div class="bg-preview-layer" id="bg-preview-layer"></div>
+              <div class="bg-preview-mock">
+                <div class="bgp-toolbar">
+                  <span class="bgp-switch"></span>
+                  <span class="bgp-search"></span>
+                  <span class="bgp-btn"></span>
+                  <span class="bgp-btn"></span>
+                </div>
+                <div class="bgp-tabs">
+                  <span class="bgp-tab active"></span>
+                  <span class="bgp-tab"></span>
+                  <span class="bgp-tab"></span>
+                  <span class="bgp-tab"></span>
+                </div>
+                <div class="bgp-list">
+                  <div class="bgp-item"><div class="bar"></div><div class="bar short"></div></div>
+                  <div class="bgp-item"><div class="bar"></div><div class="bar short"></div></div>
+                  <div class="bgp-item"><div class="bar"></div><div class="bar short"></div></div>
+                  <div class="bgp-item"><div class="bar"></div><div class="bar short"></div></div>
+                </div>
+                <div class="bgp-footer"><div class="bar"></div></div>
+              </div>
+            </div>
+            <div class="bg-options">
+              <label class="field">填充方式
+                <select id="bg-mode">
+                  <option value="stretch">拉伸（铺满面板）</option>
+                  <option value="tile">平铺（原尺寸重复）</option>
+                </select>
+              </label>
+              <label class="field">背景透明度
+                <div class="bg-slider-row">
+                  <input id="bg-opacity" type="range" min="5" max="100" step="1" />
+                  <span id="bg-opacity-val" class="bg-slider-val">60%</span>
+                </div>
+              </label>
+              <label class="field">图片宽度（占面板百分比）
+                <div class="bg-slider-row">
+                  <input id="bg-scale-w" type="range" min="5" max="300" step="1" />
+                  <span id="bg-scale-w-val" class="bg-slider-val">100%</span>
+                </div>
+              </label>
+              <label class="field">图片高度（占面板百分比）
+                <div class="bg-slider-row">
+                  <input id="bg-scale-h" type="range" min="5" max="300" step="1" />
+                  <span id="bg-scale-h-val" class="bg-slider-val">100%</span>
+                </div>
+              </label>
+              <div class="field">
+                <span class="desc" style="display:block;margin-bottom:6px">旋转</span>
+                <div class="bg-rotate-row">
+                  <button class="btn small bg-rot" data-rot="0">0°</button>
+                  <button class="btn small bg-rot" data-rot="90">90°</button>
+                  <button class="btn small bg-rot" data-rot="180">180°</button>
+                  <button class="btn small bg-rot" data-rot="270">270°</button>
+                </div>
+              </div>
+              <div class="field">
+                <div class="row">
+                  <button id="bg-region-toggle" class="btn">选择图片区域…</button>
+                  <button id="bg-region-reset" class="btn small" disabled>重置为整图</button>
+                </div>
+                <div id="bg-region-wrap" hidden>
+                  <div class="bg-region-box" id="bg-region-box">
+                    <img id="bg-region-img" alt="背景源图" />
+                    <div class="bg-region-rect" id="bg-region-rect"></div>
+                  </div>
+                  <p class="desc">在图片上按住拖动，框选用作背景的区域；再次点击「选择图片区域…」收起。</p>
+                </div>
+              </div>
+              <div class="row" style="margin-top: 6px">
+                <button id="bg-apply" class="btn primary">应用背景</button>
+              </div>
+            </div>
+          </div>
+          <p class="desc">选择图片后在上方预览中实时调整：拉伸/平铺、图片宽高百分比、框选区域、透明度、旋转；点「应用背景」后主面板立即生效。平铺模式下宽高百分比决定每块重复单元的大小。动图只取第一帧；与窗口材质同时开启时背景图优先显示。</p>
+        </section>
       </div>
 
       <!-- 记录规则 -->
