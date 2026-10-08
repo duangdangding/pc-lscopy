@@ -1548,22 +1548,29 @@ fn capture_frontmost_app() -> FrontApp {
     app
 }
 
+// macOS：当前前台 App 的 bundle id（粘贴前轮询验证焦点是否已还回目标 App）。
+#[cfg(target_os = "macos")]
+fn frontmost_bundle() -> Option<String> {
+    capture_frontmost_app().bundle
+}
+
 // macOS：粘贴前把「面板弹出时的前台 App」显式激活回来（open -b 等价于 Cmd+Tab 切回）。
 // 只激活仍存活的进程（kill -0 探测），避免把已退出的 App 重新拉起；
 // 前台是自己（设置窗口等场景）或无记录时不动作，退回 NSApplication.hide 的默认行为。
+// 返回激活目标的 bundle id；未发出激活请求时返回 None。
+// 注意 open -b 只是向 LaunchServices 发请求，真正激活是异步的（快则几十毫秒，
+// 跨 Space / 应用繁忙时可近一秒），调用方必须轮询验证前台已切换再模拟 ⌘V。
 #[cfg(target_os = "macos")]
-fn reactivate_prev_app(app: &AppHandle) {
+fn reactivate_prev_app(app: &AppHandle) -> Option<String> {
     let prev = app
         .state::<AppState>()
         .prev_front_app
         .lock()
         .unwrap()
         .clone();
-    let Some(bundle) = prev.bundle else {
-        return;
-    };
+    let bundle = prev.bundle?;
     if bundle == app.config().identifier {
-        return;
+        return None;
     }
     if let Some(pid) = prev.pid {
         let alive = std::process::Command::new("kill")
@@ -1572,10 +1579,11 @@ fn reactivate_prev_app(app: &AppHandle) {
             .map(|s| s.success())
             .unwrap_or(false);
         if !alive {
-            return;
+            return None;
         }
     }
     let _ = std::process::Command::new("open").args(["-b", &bundle]).status();
+    Some(bundle)
 }
 
 // ---------- macOS 辅助功能权限 ----------
@@ -1704,13 +1712,37 @@ fn paste_worker(app: AppHandle) {
         // NSApplication.hide 的「上一个 App」推断（它经常把访达激活到最前，
         // ⌘V 会打进访达生成「文本剪贴」文件）
         #[cfg(target_os = "macos")]
-        reactivate_prev_app(&app);
-        // 等焦点 settling：Windows 50ms 在响应速度和可靠性之间比较平衡；
-        // macOS 要等 App 重新激活完成，需要略久
-        #[cfg(target_os = "macos")]
-        std::thread::sleep(Duration::from_millis(150));
+        let reactivate_target = reactivate_prev_app(&app);
+        // 等焦点 settling：Windows 50ms 在响应速度和可靠性之间比较平衡
         #[cfg(not(target_os = "macos"))]
         std::thread::sleep(Duration::from_millis(50));
+        // macOS：open -b 的激活是异步的，固定 sleep 不可靠——没切回去时 ⌘V 会
+        // 落进访达生成「文本剪贴」文件。轮询等前台真正切回目标 App（最多约 1s），
+        // 切回后再小等一段，让目标 App 内部的键盘焦点就位
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(target) = reactivate_target {
+                let mut confirmed = false;
+                for _ in 0..17 {
+                    std::thread::sleep(Duration::from_millis(60));
+                    if frontmost_bundle().as_deref() == Some(target.as_str()) {
+                        confirmed = true;
+                        break;
+                    }
+                }
+                if confirmed {
+                    std::thread::sleep(Duration::from_millis(50));
+                } else if frontmost_bundle().as_deref() == Some("com.apple.finder") {
+                    // 超时且前台仍是访达：⌘V 必生成剪贴文件，跳过模拟按键
+                    //（剪贴板已更新，用户可手动 ⌘V）
+                    continue;
+                }
+                // 超时但前台是其他 App：交给下面的 AX 可输入性检测兜底
+            } else {
+                // 无目标记录（前台是自己等场景）：退回 NSApp.hide 推断的 settling
+                std::thread::sleep(Duration::from_millis(150));
+            }
+        }
         // macOS：焦点已还给目标 App。若键盘焦点明确不在文本输入控件上
         // （桌面 / 访达文件列表等），⌘V 会被访达落成「文本剪贴」文件——跳过模拟按键；
         // 识别不出焦点控件时照常粘贴（与旧行为一致）
