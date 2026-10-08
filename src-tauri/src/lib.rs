@@ -1513,53 +1513,128 @@ fn focused_element_is_editable() -> Option<bool> {
     }
 }
 
-// macOS：读取当前前台 App 的 pid 与 bundle id（lsappinfo 查询，无需额外权限）。
+// ---------- macOS 前台 App（NSWorkspace / NSRunningApplication 裸 FFI） ----------
+// 不走 lsappinfo 命令行解析：其输出格式（ASN 前缀、键值分隔符、尾部分号）随系统
+// 版本变动，解析失败会静默退化成「无目标记录」，焦点归还落空后 ⌘V 打进访达生成
+// 「文本剪贴」文件。NSWorkspace 是结构化 API，结果确定，且无需 spawn 进程。
+#[cfg(target_os = "macos")]
+mod mac_front {
+    use super::FrontApp;
+    use std::ffi::{c_char, c_void, CStr, CString};
+
+    type Id = *mut c_void;
+    #[link(name = "objc", kind = "dylib")]
+    extern "C" {
+        fn objc_getClass(name: *const c_char) -> Id;
+        fn sel_registerName(name: *const c_char) -> Id;
+        // objc_msgSend 真实签名是可变参数，这里不声明签名，调用点 transmute 成所需签名
+        //（同一符号多签名 extern 声明会触发 clashing_extern_declarations 警告）
+        fn objc_msgSend();
+    }
+
+    unsafe fn msg0<R>(receiver: Id, op: Id) -> R {
+        let f: unsafe extern "C" fn(Id, Id) -> R =
+            std::mem::transmute(objc_msgSend as *const c_void);
+        f(receiver, op)
+    }
+    unsafe fn msg1<R, A>(receiver: Id, op: Id, a: A) -> R {
+        let f: unsafe extern "C" fn(Id, Id, A) -> R =
+            std::mem::transmute(objc_msgSend as *const c_void);
+        f(receiver, op, a)
+    }
+
+    fn class(name: &str) -> Id {
+        let name = CString::new(name).unwrap();
+        unsafe { objc_getClass(name.as_ptr()) }
+    }
+    fn sel(name: &str) -> Id {
+        let name = CString::new(name).unwrap();
+        unsafe { sel_registerName(name.as_ptr()) }
+    }
+
+    // 后台线程（paste_worker）没有 autorelease pool，直接调 AppKit 会泄漏并刷警告；
+    // 包一层 NSAutoreleasePool。主线程调用同样安全（嵌套 pool 合法）。
+    fn with_pool<R>(f: impl FnOnce() -> R) -> R {
+        unsafe {
+            let pool: Id = msg0(msg0::<Id>(class("NSAutoreleasePool"), sel("alloc")), sel("init"));
+            let r = f();
+            if !pool.is_null() {
+                msg0::<()>(pool, sel("drain"));
+            }
+            r
+        }
+    }
+
+    unsafe fn ns_to_string(s: Id) -> Option<String> {
+        if s.is_null() {
+            return None;
+        }
+        let p = msg0::<Id>(s, sel("UTF8String")) as *const c_char;
+        if p.is_null() {
+            return None;
+        }
+        let v = CStr::from_ptr(p).to_string_lossy().into_owned();
+        (!v.is_empty()).then_some(v)
+    }
+
+    /// 当前前台 App 的 pid + bundle id（NSWorkspace.frontmostApplication）
+    pub fn frontmost_app() -> FrontApp {
+        with_pool(|| unsafe {
+            let ws: Id = msg0(class("NSWorkspace"), sel("sharedWorkspace"));
+            let app: Id = if ws.is_null() {
+                std::ptr::null_mut()
+            } else {
+                msg0(ws, sel("frontmostApplication"))
+            };
+            if app.is_null() {
+                return FrontApp::default();
+            }
+            let pid = msg0::<i32>(app, sel("processIdentifier"));
+            FrontApp {
+                pid: (pid > 0).then_some(pid),
+                bundle: ns_to_string(msg0::<Id>(app, sel("bundleIdentifier"))),
+            }
+        })
+    }
+
+    /// 按 pid 激活 App（NSRunningApplication activateWithOptions:，
+    /// NSApplicationActivateIgnoringOtherApps = 1<<1）。进程已退出/激活失败返回 false。
+    /// 该 API 在 macOS 14 起标记 deprecated 但仍正常工作，且无平替的同步语义。
+    pub fn activate_pid(pid: i32) -> bool {
+        with_pool(|| unsafe {
+            let app: Id = msg1(
+                class("NSRunningApplication"),
+                sel("runningApplicationWithProcessIdentifier:"),
+                pid,
+            );
+            if app.is_null() {
+                return false;
+            }
+            msg1::<bool, usize>(app, sel("activateWithOptions:"), 1 << 1)
+        })
+    }
+}
+
+// macOS：读取当前前台 App 的 pid 与 bundle id（NSWorkspace，无需额外权限）。
 // 必须在面板弹出瞬间调用，此时前台还是用户的目标 App。
 #[cfg(target_os = "macos")]
 fn capture_frontmost_app() -> FrontApp {
-    let mut app = FrontApp::default();
-    let Ok(front) = std::process::Command::new("lsappinfo").arg("front").output() else {
-        return app;
-    };
-    let asn = String::from_utf8_lossy(&front.stdout).trim().to_string();
-    if asn.is_empty() {
-        return app;
-    }
-    let Ok(info) = std::process::Command::new("lsappinfo")
-        .args(["info", &asn])
-        .output()
-    else {
-        return app;
-    };
-    let text = String::from_utf8_lossy(&info.stdout);
-    for line in text.lines() {
-        let l = line.trim();
-        if let Some(v) = l.strip_prefix("\"pid\"") {
-            let digits: String = v.chars().filter(|c| c.is_ascii_digit()).collect();
-            app.pid = digits.parse().ok();
-        } else if let Some(v) = l.strip_prefix("\"CFBundleIdentifier\"") {
-            let v = v.trim_start_matches(|c| c == '=' || c == ' ' || c == '"');
-            let v = v.trim_end_matches(|c| c == '"' || c == ' ');
-            if !v.is_empty() {
-                app.bundle = Some(v.to_string());
-            }
-        }
-    }
-    app
+    mac_front::frontmost_app()
 }
 
 // macOS：当前前台 App 的 bundle id（粘贴前轮询验证焦点是否已还回目标 App）。
 #[cfg(target_os = "macos")]
 fn frontmost_bundle() -> Option<String> {
-    capture_frontmost_app().bundle
+    mac_front::frontmost_app().bundle
 }
 
-// macOS：粘贴前把「面板弹出时的前台 App」显式激活回来（open -b 等价于 Cmd+Tab 切回）。
-// 只激活仍存活的进程（kill -0 探测），避免把已退出的 App 重新拉起；
+// macOS：粘贴前把「面板弹出时的前台 App」显式激活回来。
+// 优先 NSRunningApplication.activate（按 pid，进程已退出则自然失败）；
+// 失败时回落 open -b（等价于 Cmd+Tab 切回）。
 // 前台是自己（设置窗口等场景）或无记录时不动作，退回 NSApplication.hide 的默认行为。
 // 返回激活目标的 bundle id；未发出激活请求时返回 None。
-// 注意 open -b 只是向 LaunchServices 发请求，真正激活是异步的（快则几十毫秒，
-// 跨 Space / 应用繁忙时可近一秒），调用方必须轮询验证前台已切换再模拟 ⌘V。
+// 注意激活是异步生效的（快则几十毫秒，跨 Space / 应用繁忙时可近一秒），
+// 调用方必须轮询验证前台已切换再模拟 ⌘V。
 #[cfg(target_os = "macos")]
 fn reactivate_prev_app(app: &AppHandle) -> Option<String> {
     let prev = app
@@ -1572,18 +1647,40 @@ fn reactivate_prev_app(app: &AppHandle) -> Option<String> {
     if bundle == app.config().identifier {
         return None;
     }
-    if let Some(pid) = prev.pid {
-        let alive = std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if !alive {
-            return None;
+    let activated = prev.pid.map(mac_front::activate_pid).unwrap_or(false);
+    if !activated {
+        let _ = std::process::Command::new("open").args(["-b", &bundle]).status();
+    }
+    Some(bundle)
+}
+
+// macOS：粘贴链路调试日志（数据目录 lscopy-paste-debug.log，随配置文件同目录）。
+// 逐条记录每次粘贴的目标 App、前台轮询结果、AX 检测与最终决定，
+// 用于定位「⌘V 落进访达生成剪贴文件」类问题；文件超 256KB 自动清空重写。
+#[cfg(target_os = "macos")]
+fn paste_debug(app: &AppHandle, msg: &str) {
+    use std::io::Write;
+    let state = app.state::<AppState>();
+    let Some(dir) = state.config_file.lock().unwrap().parent().map(|d| d.to_path_buf()) else {
+        return;
+    };
+    let path = dir.join("lscopy-paste-debug.log");
+    let t = now_secs() + local_utc_offset(now_secs());
+    let line = format!(
+        "[{:02}:{:02}:{:02}] {}\n",
+        (t % 86400) / 3600,
+        (t % 3600) / 60,
+        t % 60,
+        msg
+    );
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() > 256 * 1024 {
+            let _ = std::fs::remove_file(&path);
         }
     }
-    let _ = std::process::Command::new("open").args(["-b", &bundle]).status();
-    Some(bundle)
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = f.write_all(line.as_bytes());
+    }
 }
 
 // ---------- macOS 辅助功能权限 ----------
@@ -1708,47 +1805,73 @@ fn paste_worker(app: AppHandle) {
         if !ensure_accessibility(&app) {
             continue; // 剪贴板已更新，用户可手动 ⌘V
         }
-        // macOS：把焦点显式还给「弹出面板时的前台 App」（open -b），不依赖
+        // macOS：把焦点显式还给「弹出面板时的前台 App」，不依赖
         // NSApplication.hide 的「上一个 App」推断（它经常把访达激活到最前，
         // ⌘V 会打进访达生成「文本剪贴」文件）
         #[cfg(target_os = "macos")]
         let reactivate_target = reactivate_prev_app(&app);
+        #[cfg(target_os = "macos")]
+        paste_debug(&app, &format!("paste begin, target={reactivate_target:?}"));
         // 等焦点 settling：Windows 50ms 在响应速度和可靠性之间比较平衡
         #[cfg(not(target_os = "macos"))]
         std::thread::sleep(Duration::from_millis(50));
-        // macOS：open -b 的激活是异步的，固定 sleep 不可靠——没切回去时 ⌘V 会
-        // 落进访达生成「文本剪贴」文件。轮询等前台真正切回目标 App（最多约 1s），
+        // macOS：激活是异步生效的，固定 sleep 不可靠——没切回去时 ⌘V 会落进
+        // 访达生成「文本剪贴」文件。轮询等前台真正切回目标 App（最多约 1s），
         // 切回后再小等一段，让目标 App 内部的键盘焦点就位
         #[cfg(target_os = "macos")]
         {
             if let Some(target) = reactivate_target {
                 let mut confirmed = false;
+                let mut waited = 0;
                 for _ in 0..17 {
                     std::thread::sleep(Duration::from_millis(60));
+                    waited += 60;
                     if frontmost_bundle().as_deref() == Some(target.as_str()) {
                         confirmed = true;
                         break;
                     }
                 }
                 if confirmed {
+                    paste_debug(&app, &format!("frontmost ok: {target} ({waited}ms)"));
                     std::thread::sleep(Duration::from_millis(50));
-                } else if frontmost_bundle().as_deref() == Some("com.apple.finder") {
-                    // 超时且前台仍是访达：⌘V 必生成剪贴文件，跳过模拟按键
-                    //（剪贴板已更新，用户可手动 ⌘V）
-                    continue;
+                } else {
+                    let now_front = frontmost_bundle();
+                    paste_debug(
+                        &app,
+                        &format!("frontmost timeout: target={target} actual={now_front:?}"),
+                    );
+                    if now_front.as_deref() == Some("com.apple.finder") {
+                        // 超时且前台仍是访达：⌘V 必生成剪贴文件，跳过模拟按键
+                        //（剪贴板已更新，用户可手动 ⌘V）
+                        paste_debug(&app, "skip: finder frontmost");
+                        continue;
+                    }
                 }
                 // 超时但前台是其他 App：交给下面的 AX 可输入性检测兜底
             } else {
-                // 无目标记录（前台是自己等场景）：退回 NSApp.hide 推断的 settling
+                // 无目标记录（前台是自己等场景）：退回 NSApp.hide 推断的 settling；
+                //  settling 后前台若是访达，⌘V 必生成剪贴文件，同样跳过
                 std::thread::sleep(Duration::from_millis(150));
+                let now_front = frontmost_bundle();
+                paste_debug(&app, &format!("no target, frontmost={now_front:?}"));
+                if now_front.as_deref() == Some("com.apple.finder") {
+                    paste_debug(&app, "skip: finder frontmost (no target)");
+                    continue;
+                }
             }
         }
         // macOS：焦点已还给目标 App。若键盘焦点明确不在文本输入控件上
         // （桌面 / 访达文件列表等），⌘V 会被访达落成「文本剪贴」文件——跳过模拟按键；
         // 识别不出焦点控件时照常粘贴（与旧行为一致）
         #[cfg(target_os = "macos")]
-        if focused_element_is_editable() == Some(false) {
-            continue;
+        {
+            let editable = focused_element_is_editable();
+            paste_debug(&app, &format!("ax editable={editable:?}"));
+            if editable == Some(false) {
+                paste_debug(&app, "skip: non-editable focus");
+                continue;
+            }
+            paste_debug(&app, "simulate ⌘V");
         }
         simulate_paste_safe(&app);
     }
