@@ -150,7 +150,7 @@ cargo clippy           # lint
   改动时询问是否迁移旧文件；读取时兼容 exe 同目录的旧指针）。数据库 `lscopy.db` 默认同目录；旧版系统配置目录
   （`%APPDATA%`）的配置会在首次启动时自动迁移。落盘统一走 `persist_config`（锁顺序固定 config → lan.settings → relay.settings → config_file）。
 - 主窗口失焦自动隐藏是**延迟 150ms 复查**实现的（拖动/缩放会造成瞬时失焦）；改动窗口事件逻辑时注意 `dragging` / `panel_pinned` / `main_focused` 三个状态。
-- **mac 面板圆角**：macOS 无边框窗口没有系统圆角（Windows 由 DWM 自动圆角），`main.ts` 检测 `isMac` 给 `<html>` 加 `.mac` 类，`styles.css` 把背景与圆角移到 `.app` 并 overflow 裁切（body 背景会传播到画布、不受圆角裁切，必须清掉，用 `!important` 压过主题/材质规则）；固定定位的 `.bg-layer` / `.confirm-overlay` 不受祖先 overflow 裁切，各自带圆角。
+- **mac 面板圆角**：macOS 无边框窗口没有系统圆角（Windows 由 DWM 自动圆角），`main.ts` 检测 `isMac` 给 `<html>` 加 `.mac` 类，`styles.css` 把背景与圆角移到 `.app` 并 overflow 裁切（body 背景会传播到画布、不受圆角裁切，必须清掉，用 `!important` 压过主题/材质规则）；固定定位的 `.bg-layer` / `.confirm-overlay` 不受祖先 overflow 裁切，各自带圆角。**前提**：mac 的 transparent 窗口依赖 wry 的 WKWebView 私有 API（`drawsBackground`），必须同时开 `Cargo.toml` 的 tauri feature `macos-private-api` 和 `tauri.conf.json` 的 `app.macOSPrivateApi: true`（tauri-build 会校验两者一致），否则 WebView 保持不透明白底，CSS 裁出的圆角外会露出直角边框。
 - **mac 粘贴防剪贴文件**：`paste_worker` 模拟按键前用 `lsappinfo`（`frontmost_is_finder`）检测前台是访达则跳过 ⌘V——桌面/访达窗口没有文本粘贴目标，直接 ⌘V 会让访达在桌面生成「文本剪贴」文件；剪贴板仍会更新，用户可到目标处手动粘贴。
 - 版本号需同步修改 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 三处（`Cargo.lock` 随构建自动更新）。
 - **应用内更新（Tauri updater）**：`tauri.conf.json` 已开启 `createUpdaterArtifacts` 并配置 pubkey/endpoints，
