@@ -364,9 +364,6 @@ struct AppState {
     paste_running: AtomicBool,
     // 面板弹出前的前台窗口，粘贴后把焦点还给它
     prev_hwnd: Mutex<isize>,
-    // macOS：面板弹出瞬间记录前台 App 是否为访达（与 prev_hwnd 同时刻快照）；
-    // 为 true 时粘贴跳过模拟按键，避免访达把剪贴板文本落成「文本剪贴」文件
-    prev_front_is_finder: AtomicBool,
     // 面板钉住状态：钉住后失焦/粘贴都不自动隐藏（会话内有效，不持久化）
     panel_pinned: AtomicBool,
     // 拖动/缩放进行中：系统模态拖动会造成瞬时失焦，此时不自动隐藏
@@ -1391,27 +1388,99 @@ fn simulate_paste_safe(app: &AppHandle) {
     }
 }
 
-// macOS：当前前台 App 是否为访达（Finder）。
-// 桌面/访达窗口没有文本粘贴目标，⌘V 会让访达把剪贴板文本落成「文本剪贴」文件。
-// 注意：必须在面板**弹出瞬间**调用（此时前台还是用户的目标 App）；
-// 面板隐藏后 NSApplication.hide 会让系统把前台回退到访达，那时再查永远是真的。
-// 用 lsappinfo 查询前台应用的 bundle id，无需额外权限（AppleScript 会弹自动化授权）。
+// macOS：键盘焦点当前是否在一个可输入文本的控件上（辅助功能 API，粘贴时调用）。
+// 桌面 / 访达文件列表等场景没有文本粘贴目标，⌘V 会被访达把剪贴板文本落成
+// 「文本剪贴」文件。这里不猜前台 App（面板隐藏后系统会把前台回退成访达，猜不准），
+// 直接查焦点控件的角色：明确不可输入（列表/图标/滚动区/按钮等）才返回 Some(false)，
+// 角色未知或查询失败返回 None——调用方只在 Some(false) 时跳过粘贴，宁可多贴不漏贴。
+// 前置：模拟 ⌘V 本就要求辅助功能权限（paste_worker 已先 ensure_accessibility）。
 #[cfg(target_os = "macos")]
-fn frontmost_is_finder() -> bool {
-    let Ok(front) = std::process::Command::new("lsappinfo").arg("front").output() else {
-        return false;
-    };
-    let asn = String::from_utf8_lossy(&front.stdout).trim().to_string();
-    if asn.is_empty() {
-        return false;
+fn focused_element_is_editable() -> Option<bool> {
+    use std::ffi::{c_char, c_void, CStr};
+    type CFRef = *const c_void;
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFStringCreateWithCString(alloc: CFRef, s: *const c_char, encoding: u32) -> CFRef;
+        fn CFStringGetCString(s: CFRef, buf: *mut c_char, size: isize, encoding: u32) -> bool;
+        fn CFRelease(cf: CFRef);
     }
-    let Ok(info) = std::process::Command::new("lsappinfo")
-        .args(["info", "-only", "bundleID", &asn])
-        .output()
-    else {
-        return false;
-    };
-    String::from_utf8_lossy(&info.stdout).contains("com.apple.finder")
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXUIElementCreateSystemWide() -> CFRef;
+        fn AXUIElementCopyAttributeValue(element: CFRef, attribute: CFRef, value: *mut CFRef) -> i32;
+    }
+    const UTF8: u32 = 0x0800_0100; // kCFStringEncodingUTF8
+    // 可输入文本的角色
+    const EDITABLE: [&str; 6] = [
+        "AXTextField",
+        "AXTextArea",
+        "AXComboBox",
+        "AXSearchField",
+        "AXText",
+        "AXWebArea",
+    ];
+    // 明确不可输入文本的角色：访达桌面图标/文件列表、普通按钮图片等
+    const NON_EDITABLE: [&str; 12] = [
+        "AXList",
+        "AXIcon",
+        "AXScrollArea",
+        "AXButton",
+        "AXImage",
+        "AXStaticText",
+        "AXTable",
+        "AXOutline",
+        "AXRow",
+        "AXCell",
+        "AXColumn",
+        "AXBrowser",
+    ];
+    unsafe {
+        let system = AXUIElementCreateSystemWide();
+        if system.is_null() {
+            return None;
+        }
+        let attr_focused =
+            CFStringCreateWithCString(std::ptr::null(), b"AXFocusedUIElement\0".as_ptr() as *const c_char, UTF8);
+        let attr_role =
+            CFStringCreateWithCString(std::ptr::null(), b"AXRole\0".as_ptr() as *const c_char, UTF8);
+        // 取系统级焦点控件
+        let mut focused: CFRef = std::ptr::null();
+        let got_focused = !attr_focused.is_null()
+            && AXUIElementCopyAttributeValue(system, attr_focused, &mut focused) == 0
+            && !focused.is_null();
+        // 取焦点控件的角色字符串
+        let mut role_buf = [0 as c_char; 128];
+        let mut got_role = false;
+        if got_focused && !attr_role.is_null() {
+            let mut role: CFRef = std::ptr::null();
+            if AXUIElementCopyAttributeValue(focused, attr_role, &mut role) == 0 && !role.is_null() {
+                got_role = CFStringGetCString(role, role_buf.as_mut_ptr(), role_buf.len() as isize, UTF8);
+                CFRelease(role);
+            }
+        }
+        // 统一释放（Create/Copy 规则拿到的引用）
+        if got_focused {
+            CFRelease(focused);
+        }
+        if !attr_focused.is_null() {
+            CFRelease(attr_focused);
+        }
+        if !attr_role.is_null() {
+            CFRelease(attr_role);
+        }
+        CFRelease(system);
+        if !got_focused || !got_role {
+            return None;
+        }
+        let role = CStr::from_ptr(role_buf.as_ptr()).to_string_lossy();
+        if EDITABLE.contains(&role.as_ref()) {
+            return Some(true);
+        }
+        if NON_EDITABLE.contains(&role.as_ref()) {
+            return Some(false);
+        }
+        None // 未知角色：交给调用方按「保持粘贴」处理
+    }
 }
 
 // ---------- macOS 辅助功能权限 ----------
@@ -1542,10 +1611,11 @@ fn paste_worker(app: AppHandle) {
         std::thread::sleep(Duration::from_millis(120));
         #[cfg(not(target_os = "macos"))]
         std::thread::sleep(Duration::from_millis(50));
-        // macOS：面板弹出时快照的前台是访达（桌面/访达窗口没有文本粘贴目标），
-        // ⌘V 会在桌面生成「文本剪贴」文件——跳过模拟按键（剪贴板已更新，可手动粘贴）
+        // macOS：焦点已还给目标 App。若键盘焦点明确不在文本输入控件上
+        // （桌面 / 访达文件列表等），⌘V 会被访达落成「文本剪贴」文件——跳过模拟按键；
+        // 识别不出焦点控件时照常粘贴（与旧行为一致）
         #[cfg(target_os = "macos")]
-        if state.prev_front_is_finder.load(Ordering::SeqCst) {
+        if focused_element_is_editable() == Some(false) {
             continue;
         }
         simulate_paste_safe(&app);
@@ -2405,11 +2475,6 @@ fn show_panel(app: AppHandle) {
         if !win.is_visible().unwrap_or(false) {
             // 记住当前前台窗口，之后若在面板上粘贴能把焦点还回去
             *app.state::<AppState>().prev_hwnd.lock().unwrap() = foreground_hwnd();
-            // macOS：同时快照前台是否为访达（粘贴时据此跳过模拟按键）
-            #[cfg(target_os = "macos")]
-            app.state::<AppState>()
-                .prev_front_is_finder
-                .store(frontmost_is_finder(), Ordering::SeqCst);
             let _ = win.show();
         }
     }
@@ -2422,11 +2487,6 @@ fn toggle_window(app: &AppHandle) {
         } else {
             // 记住弹出前的前台窗口，粘贴后把焦点还给它
             *app.state::<AppState>().prev_hwnd.lock().unwrap() = foreground_hwnd();
-            // macOS：同时快照前台是否为访达（粘贴时据此跳过模拟按键）
-            #[cfg(target_os = "macos")]
-            app.state::<AppState>()
-                .prev_front_is_finder
-                .store(frontmost_is_finder(), Ordering::SeqCst);
             if app
                 .state::<AppState>()
                 .config
@@ -2761,7 +2821,6 @@ pub fn run() {
                 paste_pending: Mutex::new(false),
                 paste_running: AtomicBool::new(false),
                 prev_hwnd: Mutex::new(0),
-                prev_front_is_finder: AtomicBool::new(false),
                 panel_pinned: AtomicBool::new(false),
                 dragging: AtomicBool::new(false),
                 main_focused: AtomicBool::new(false),
