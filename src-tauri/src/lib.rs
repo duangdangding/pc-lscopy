@@ -1401,14 +1401,14 @@ fn simulate_paste_safe(app: &AppHandle) {
     }
 }
 
-// macOS：键盘焦点当前是否在一个可输入文本的控件上（辅助功能 API，粘贴时调用）。
-// 桌面 / 访达文件列表等场景没有文本粘贴目标，⌘V 会被访达把剪贴板文本落成
-// 「文本剪贴」文件。这里不猜前台 App（面板隐藏后系统会把前台回退成访达，猜不准），
-// 直接查焦点控件的角色：明确不可输入（列表/图标/滚动区/按钮等）才返回 Some(false)，
-// 角色未知或查询失败返回 None——调用方只在 Some(false) 时跳过粘贴，宁可多贴不漏贴。
+// macOS：查询键盘焦点控件的 AX 角色（辅助功能 API，粘贴时调用，仅作诊断日志）。
+// 注意：角色黑名单/白名单曾被用来拦截粘贴，但自定义渲染的编辑器（如 Sublime Text，
+// 焦点角色是 AXScrollArea 等容器角色）会被误伤——v1.6.6~v1.6.9 的教训。
+// 现在拦截只认「前台是访达」这一确定性条件（⌘V 落成「文本剪贴」文件只有访达会干），
+// 本函数的返回值不再参与粘贴决策。
 // 前置：模拟 ⌘V 本就要求辅助功能权限（paste_worker 已先 ensure_accessibility）。
 #[cfg(target_os = "macos")]
-fn focused_element_is_editable() -> Option<bool> {
+fn focused_element_role() -> Option<String> {
     use std::ffi::{c_char, c_void, CStr};
     type CFRef = *const c_void;
     #[link(name = "CoreFoundation", kind = "framework")]
@@ -1423,47 +1423,6 @@ fn focused_element_is_editable() -> Option<bool> {
         fn AXUIElementCopyAttributeValue(element: CFRef, attribute: CFRef, value: *mut CFRef) -> i32;
     }
     const UTF8: u32 = 0x0800_0100; // kCFStringEncodingUTF8
-    // 可输入文本的角色
-    const EDITABLE: [&str; 6] = [
-        "AXTextField",
-        "AXTextArea",
-        "AXComboBox",
-        "AXSearchField",
-        "AXText",
-        "AXWebArea",
-    ];
-    // 明确不可输入文本的角色：访达桌面图标/文件列表、窗口容器、菜单与按钮控件等。
-    // 注意刻意不收 AXGroup/AXSplitGroup：部分应用的输入区可能包在 Group 里，误伤风险大
-    const NON_EDITABLE: [&str; 28] = [
-        "AXList",
-        "AXIcon",
-        "AXScrollArea",
-        "AXButton",
-        "AXImage",
-        "AXStaticText",
-        "AXTable",
-        "AXOutline",
-        "AXRow",
-        "AXCell",
-        "AXColumn",
-        "AXBrowser",
-        "AXWindow",
-        "AXToolbar",
-        "AXTabGroup",
-        "AXMenuBar",
-        "AXMenuBarItem",
-        "AXMenu",
-        "AXMenuItem",
-        "AXSheet",
-        "AXDrawer",
-        "AXPopover",
-        "AXScrollBar",
-        "AXRadioGroup",
-        "AXCheckBox",
-        "AXRadioButton",
-        "AXSlider",
-        "AXPopUpButton",
-    ];
     unsafe {
         let system = AXUIElementCreateSystemWide();
         if system.is_null() {
@@ -1502,14 +1461,7 @@ fn focused_element_is_editable() -> Option<bool> {
         if !got_focused || !got_role {
             return None;
         }
-        let role = CStr::from_ptr(role_buf.as_ptr()).to_string_lossy();
-        if EDITABLE.contains(&role.as_ref()) {
-            return Some(true);
-        }
-        if NON_EDITABLE.contains(&role.as_ref()) {
-            return Some(false);
-        }
-        None // 未知角色：交给调用方按「保持粘贴」处理
+        Some(CStr::from_ptr(role_buf.as_ptr()).to_string_lossy().into_owned())
     }
 }
 
@@ -1860,15 +1812,15 @@ fn paste_worker(app: AppHandle) {
                 }
             }
         }
-        // macOS：焦点已还给目标 App。若键盘焦点明确不在文本输入控件上
-        // （桌面 / 访达文件列表等），⌘V 会被访达落成「文本剪贴」文件——跳过模拟按键；
-        // 识别不出焦点控件时照常粘贴（与旧行为一致）
+        // macOS：AX 焦点控件角色只做诊断记录，不再用于拦截（自定义渲染的编辑器如
+        // Sublime Text 焦点角色是容器角色，按角色拦截会误伤）。⌘V 落成「文本剪贴」
+        // 文件只有访达会干——发出前最后确认前台不是访达（NSWorkspace 检测是确定的）
         #[cfg(target_os = "macos")]
         {
-            let editable = focused_element_is_editable();
-            paste_debug(&app, &format!("ax editable={editable:?}"));
-            if editable == Some(false) {
-                paste_debug(&app, "skip: non-editable focus");
+            let role = focused_element_role();
+            paste_debug(&app, &format!("ax role={role:?}"));
+            if frontmost_bundle().as_deref() == Some("com.apple.finder") {
+                paste_debug(&app, "skip: finder frontmost (final check)");
                 continue;
             }
             paste_debug(&app, "simulate ⌘V");
