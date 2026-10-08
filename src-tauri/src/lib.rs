@@ -349,6 +349,14 @@ struct DbInfo {
     max_items: i64,
 }
 
+// macOS：面板弹出瞬间记录的前台 App（pid + bundle id），见 AppState.prev_front_app
+#[cfg(target_os = "macos")]
+#[derive(Clone, Default)]
+struct FrontApp {
+    pid: Option<i32>,
+    bundle: Option<String>,
+}
+
 struct AppState {
     pub(crate) db: Mutex<Connection>,
     pub(crate) config: Mutex<AppConfig>,
@@ -364,6 +372,11 @@ struct AppState {
     paste_running: AtomicBool,
     // 面板弹出前的前台窗口，粘贴后把焦点还给它
     prev_hwnd: Mutex<isize>,
+    // macOS：面板弹出瞬间记录的前台 App（pid + bundle id）。
+    // 粘贴时显式 open -b 激活回来——不依赖 NSApplication.hide 的「上一个 App」推断
+    // （该推断经常错误地把访达激活到最前，⌘V 会打进访达生成「文本剪贴」文件）
+    #[cfg(target_os = "macos")]
+    prev_front_app: Mutex<FrontApp>,
     // 面板钉住状态：钉住后失焦/粘贴都不自动隐藏（会话内有效，不持久化）
     panel_pinned: AtomicBool,
     // 拖动/缩放进行中：系统模态拖动会造成瞬时失焦，此时不自动隐藏
@@ -1419,8 +1432,9 @@ fn focused_element_is_editable() -> Option<bool> {
         "AXText",
         "AXWebArea",
     ];
-    // 明确不可输入文本的角色：访达桌面图标/文件列表、普通按钮图片等
-    const NON_EDITABLE: [&str; 12] = [
+    // 明确不可输入文本的角色：访达桌面图标/文件列表、窗口容器、菜单与按钮控件等。
+    // 注意刻意不收 AXGroup/AXSplitGroup：部分应用的输入区可能包在 Group 里，误伤风险大
+    const NON_EDITABLE: [&str; 28] = [
         "AXList",
         "AXIcon",
         "AXScrollArea",
@@ -1433,6 +1447,22 @@ fn focused_element_is_editable() -> Option<bool> {
         "AXCell",
         "AXColumn",
         "AXBrowser",
+        "AXWindow",
+        "AXToolbar",
+        "AXTabGroup",
+        "AXMenuBar",
+        "AXMenuBarItem",
+        "AXMenu",
+        "AXMenuItem",
+        "AXSheet",
+        "AXDrawer",
+        "AXPopover",
+        "AXScrollBar",
+        "AXRadioGroup",
+        "AXCheckBox",
+        "AXRadioButton",
+        "AXSlider",
+        "AXPopUpButton",
     ];
     unsafe {
         let system = AXUIElementCreateSystemWide();
@@ -1481,6 +1511,71 @@ fn focused_element_is_editable() -> Option<bool> {
         }
         None // 未知角色：交给调用方按「保持粘贴」处理
     }
+}
+
+// macOS：读取当前前台 App 的 pid 与 bundle id（lsappinfo 查询，无需额外权限）。
+// 必须在面板弹出瞬间调用，此时前台还是用户的目标 App。
+#[cfg(target_os = "macos")]
+fn capture_frontmost_app() -> FrontApp {
+    let mut app = FrontApp::default();
+    let Ok(front) = std::process::Command::new("lsappinfo").arg("front").output() else {
+        return app;
+    };
+    let asn = String::from_utf8_lossy(&front.stdout).trim().to_string();
+    if asn.is_empty() {
+        return app;
+    }
+    let Ok(info) = std::process::Command::new("lsappinfo")
+        .args(["info", &asn])
+        .output()
+    else {
+        return app;
+    };
+    let text = String::from_utf8_lossy(&info.stdout);
+    for line in text.lines() {
+        let l = line.trim();
+        if let Some(v) = l.strip_prefix("\"pid\"") {
+            let digits: String = v.chars().filter(|c| c.is_ascii_digit()).collect();
+            app.pid = digits.parse().ok();
+        } else if let Some(v) = l.strip_prefix("\"CFBundleIdentifier\"") {
+            let v = v.trim_start_matches(|c| c == '=' || c == ' ' || c == '"');
+            let v = v.trim_end_matches(|c| c == '"' || c == ' ');
+            if !v.is_empty() {
+                app.bundle = Some(v.to_string());
+            }
+        }
+    }
+    app
+}
+
+// macOS：粘贴前把「面板弹出时的前台 App」显式激活回来（open -b 等价于 Cmd+Tab 切回）。
+// 只激活仍存活的进程（kill -0 探测），避免把已退出的 App 重新拉起；
+// 前台是自己（设置窗口等场景）或无记录时不动作，退回 NSApplication.hide 的默认行为。
+#[cfg(target_os = "macos")]
+fn reactivate_prev_app(app: &AppHandle) {
+    let prev = app
+        .state::<AppState>()
+        .prev_front_app
+        .lock()
+        .unwrap()
+        .clone();
+    let Some(bundle) = prev.bundle else {
+        return;
+    };
+    if bundle == app.config().identifier {
+        return;
+    }
+    if let Some(pid) = prev.pid {
+        let alive = std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !alive {
+            return;
+        }
+    }
+    let _ = std::process::Command::new("open").args(["-b", &bundle]).status();
 }
 
 // ---------- macOS 辅助功能权限 ----------
@@ -1605,10 +1700,15 @@ fn paste_worker(app: AppHandle) {
         if !ensure_accessibility(&app) {
             continue; // 剪贴板已更新，用户可手动 ⌘V
         }
-        // 等焦点 settling：Windows 50ms 在响应速度和可靠性之间比较平衡；
-        // macOS 要等 NSApplication.hide 完成前台 App 切换，需要略久
+        // macOS：把焦点显式还给「弹出面板时的前台 App」（open -b），不依赖
+        // NSApplication.hide 的「上一个 App」推断（它经常把访达激活到最前，
+        // ⌘V 会打进访达生成「文本剪贴」文件）
         #[cfg(target_os = "macos")]
-        std::thread::sleep(Duration::from_millis(120));
+        reactivate_prev_app(&app);
+        // 等焦点 settling：Windows 50ms 在响应速度和可靠性之间比较平衡；
+        // macOS 要等 App 重新激活完成，需要略久
+        #[cfg(target_os = "macos")]
+        std::thread::sleep(Duration::from_millis(150));
         #[cfg(not(target_os = "macos"))]
         std::thread::sleep(Duration::from_millis(50));
         // macOS：焦点已还给目标 App。若键盘焦点明确不在文本输入控件上
@@ -2475,6 +2575,12 @@ fn show_panel(app: AppHandle) {
         if !win.is_visible().unwrap_or(false) {
             // 记住当前前台窗口，之后若在面板上粘贴能把焦点还回去
             *app.state::<AppState>().prev_hwnd.lock().unwrap() = foreground_hwnd();
+            // macOS：同时记录前台 App（粘贴时显式激活回来）
+            #[cfg(target_os = "macos")]
+            {
+                let prev = capture_frontmost_app();
+                *app.state::<AppState>().prev_front_app.lock().unwrap() = prev;
+            }
             let _ = win.show();
         }
     }
@@ -2487,6 +2593,12 @@ fn toggle_window(app: &AppHandle) {
         } else {
             // 记住弹出前的前台窗口，粘贴后把焦点还给它
             *app.state::<AppState>().prev_hwnd.lock().unwrap() = foreground_hwnd();
+            // macOS：同时记录前台 App（粘贴时显式激活回来）
+            #[cfg(target_os = "macos")]
+            {
+                let prev = capture_frontmost_app();
+                *app.state::<AppState>().prev_front_app.lock().unwrap() = prev;
+            }
             if app
                 .state::<AppState>()
                 .config
@@ -2821,6 +2933,8 @@ pub fn run() {
                 paste_pending: Mutex::new(false),
                 paste_running: AtomicBool::new(false),
                 prev_hwnd: Mutex::new(0),
+                #[cfg(target_os = "macos")]
+                prev_front_app: Mutex::new(FrontApp::default()),
                 panel_pinned: AtomicBool::new(false),
                 dragging: AtomicBool::new(false),
                 main_focused: AtomicBool::new(false),
