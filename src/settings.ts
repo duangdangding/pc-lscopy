@@ -1534,9 +1534,24 @@ async function loadBgSource(): Promise<boolean> {
   return true;
 }
 
-bgEnabledEl.addEventListener("change", () => {
+bgEnabledEl.addEventListener("change", async () => {
   bgDraft.enabled = bgEnabledEl.checked;
   applyBgDraftToSelfWindow();
+  // 启用/关闭即时落盘并广播 config-changed：主面板/互传文件窗口实时跟随，
+  // 无需点「应用背景」。只合并 enabled 位到已保存配置，草稿中未应用的编辑
+  // （旋转/选区/透明度等）不受影响，仍由「应用背景」统一落盘
+  try {
+    const bg: BackgroundConfig = {
+      ...(config.background || defaultBackground()),
+      enabled: bgEnabledEl.checked,
+    };
+    await invoke("set_background_config", { bg });
+    config.background = bg;
+    // 弹出主面板看实际效果（alwaysOnTop 浮于设置窗口上方，不抢焦点）
+    await invoke("show_panel");
+  } catch (e) {
+    alertDialog(`切换背景开关失败: ${e}`);
+  }
 });
 
 // 应用范围开关：设置窗口立即整窗预览；互传文件窗口在「应用背景」落盘后随 config-changed 生效

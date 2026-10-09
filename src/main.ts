@@ -284,6 +284,26 @@ async function refresh(keepSelection = false) {
       actions.appendChild(web);
     }
 
+    // 文件条目：点击/回车 = 粘贴文件（文件本身进剪贴板，聊天发送框发文件、
+    // 资源管理器/访达复制进文件夹；目标不支持文件时双格式自动落到路径文本）。
+    // 额外的「粘贴地址」按钮：纯文本完整路径进输入框
+    if (c.kind === "file") {
+      const pa = document.createElement("button");
+      pa.className = "clip-filepaste";
+      pa.innerHTML = icons.link;
+      pa.title = "粘贴地址（完整路径文本）";
+      pa.onclick = async (e) => {
+        e.stopPropagation();
+        try {
+          await invoke("paste_clip", { id: c.id });
+        } catch (err) {
+          alertDialog(`粘贴地址失败: ${err}`);
+        }
+      };
+      actions.appendChild(pa);
+      item.title = "点击粘贴文件（不支持时自动粘贴地址）";
+    }
+
     const view = document.createElement("button");
     view.className = "clip-view";
     view.innerHTML = icons.eye;
@@ -333,7 +353,16 @@ async function refresh(keepSelection = false) {
     item.appendChild(body);
     item.appendChild(meta);
 
-    item.onclick = () => invoke("paste_clip", { id: c.id });
+    // 点击粘贴：文件条目默认「粘贴文件」，其余类型粘贴文本/图片
+    item.onclick = () => {
+      if (c.kind === "file") {
+        invoke("paste_clip_file", { id: c.id }).catch((err) =>
+          alertDialog(`粘贴文件失败: ${err}`)
+        );
+      } else {
+        invoke("paste_clip", { id: c.id });
+      }
+    };
     item.oncontextmenu = (e) => {
       e.preventDefault();
       invoke("copy_clip", { id: c.id });
@@ -369,8 +398,17 @@ document.addEventListener("keydown", async (e) => {
     applySelection();
   } else if (e.key === "Enter") {
     e.preventDefault();
-    if (clips[selected]) {
-      await invoke("paste_clip", { id: clips[selected].id });
+    const c = clips[selected];
+    if (!c) return;
+    // 与点击一致：文件条目回车 = 粘贴文件
+    if (c.kind === "file") {
+      try {
+        await invoke("paste_clip_file", { id: c.id });
+      } catch (err) {
+        alertDialog(`粘贴文件失败: ${err}`);
+      }
+    } else {
+      await invoke("paste_clip", { id: c.id });
     }
   } else if (e.key === "Escape") {
     e.preventDefault();

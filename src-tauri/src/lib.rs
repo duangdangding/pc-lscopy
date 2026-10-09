@@ -370,6 +370,9 @@ struct AppState {
     // 粘贴防抖：连点时合并为一次粘贴
     paste_pending: Mutex<bool>,
     paste_running: AtomicBool,
+    // 本次粘贴是否为「粘贴文件」模式：文件模式下剪贴板写入 CF_HDROP / 文件 URL，
+    // mac 上粘贴到访达是合法操作（等于复制进该文件夹），不做访达拦截
+    paste_file_mode: Mutex<bool>,
     // 面板弹出前的前台窗口，粘贴后把焦点还给它
     prev_hwnd: Mutex<isize>,
     // macOS：面板弹出瞬间记录的前台 App（pid + bundle id）。
@@ -693,9 +696,149 @@ fn clipboard_files() -> Option<Vec<String>> {
     }
 }
 
-#[cfg(not(target_family = "windows"))]
+// macOS：访达拷贝的文件列表（NSFilenamesPboardType，与现代 file URL 类型由系统自动互转）
+#[cfg(target_os = "macos")]
+fn clipboard_files() -> Option<Vec<String>> {
+    mac_front::copied_files()
+}
+
+#[cfg(not(any(target_family = "windows", target_os = "macos")))]
 fn clipboard_files() -> Option<Vec<String>> {
     None
+}
+
+// ---------- 把文件列表写入剪贴板（「粘贴文件」） ----------
+// 同时写入文件格式与纯文本格式（路径，\n 分隔）：目标 App 自动挑它能处理的格式——
+// 聊天发送框/资源管理器拿到文件，文本框拿到完整路径，天然实现「粘贴不成功就粘贴地址」，
+// 无需检测粘贴结果。文本用 \n 分隔与库内 content 一致，监听线程读回时哈希命中
+// 原文件记录（仅更新时间戳），不会多出一条纯文本重复记录。
+
+// Windows：CF_HDROP（DROPFILES 头 + 双 \0 结尾宽字符路径列表）+ CF_UNICODETEXT
+#[cfg(target_family = "windows")]
+fn set_clipboard_files_platform(paths: &[String], text: &str) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    type Handle = *mut std::ffi::c_void;
+    extern "system" {
+        fn OpenClipboard(hwnd: Handle) -> i32;
+        fn CloseClipboard() -> i32;
+        fn EmptyClipboard() -> i32;
+        fn SetClipboardData(fmt: u32, h: Handle) -> Handle;
+        fn GlobalAlloc(flags: u32, bytes: usize) -> Handle;
+        fn GlobalLock(h: Handle) -> Handle;
+        fn GlobalUnlock(h: Handle) -> i32;
+        fn GlobalFree(h: Handle) -> Handle;
+    }
+    const GMEM_MOVEABLE: u32 = 0x0002;
+    const CF_UNICODETEXT: u32 = 13;
+    const CF_HDROP: u32 = 15;
+    // DROPFILES 结构固定 20 字节：pFiles(DWORD) + pt(POINT) + fNC(BOOL) + fWide(BOOL)
+    const DROPFILES_SIZE: usize = 20;
+    unsafe {
+        // 剪贴板可能被其他程序短暂占用，重试几次
+        let mut opened = false;
+        for _ in 0..10 {
+            if OpenClipboard(std::ptr::null_mut()) != 0 {
+                opened = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if !opened {
+            return Err("打开剪贴板失败（被其他程序占用）".to_string());
+        }
+        let result = (|| -> Result<(), String> {
+            if EmptyClipboard() == 0 {
+                return Err("清空剪贴板失败".to_string());
+            }
+            // ---- CF_HDROP ----
+            let mut wide: Vec<u16> = Vec::new();
+            for p in paths {
+                wide.extend(std::ffi::OsStr::new(p).encode_wide());
+                wide.push(0);
+            }
+            wide.push(0); // 列表以双 \0 结束
+            let total = DROPFILES_SIZE + wide.len() * 2;
+            let h = GlobalAlloc(GMEM_MOVEABLE, total);
+            if h.is_null() {
+                return Err("GlobalAlloc(CF_HDROP) 失败".to_string());
+            }
+            let p = GlobalLock(h);
+            if p.is_null() {
+                GlobalFree(h);
+                return Err("GlobalLock(CF_HDROP) 失败".to_string());
+            }
+            std::ptr::write_bytes(p as *mut u8, 0, total);
+            *(p as *mut u32) = DROPFILES_SIZE as u32; // pFiles：路径列表偏移
+            *((p as *mut u8).add(16) as *mut u32) = 1; // fWide = TRUE
+            std::ptr::copy_nonoverlapping(
+                wide.as_ptr(),
+                (p as *mut u8).add(DROPFILES_SIZE) as *mut u16,
+                wide.len(),
+            );
+            GlobalUnlock(h);
+            // SetClipboardData 成功后句柄归系统所有，不能再释放
+            if SetClipboardData(CF_HDROP, h).is_null() {
+                GlobalFree(h);
+                return Err("SetClipboardData(CF_HDROP) 失败".to_string());
+            }
+            // ---- CF_UNICODETEXT（纯文本兜底）：失败仅忽略，文件格式已可用 ----
+            let mut wtext: Vec<u16> = std::ffi::OsStr::new(text).encode_wide().collect();
+            wtext.push(0);
+            let ht = GlobalAlloc(GMEM_MOVEABLE, wtext.len() * 2);
+            if !ht.is_null() {
+                let pt = GlobalLock(ht);
+                if !pt.is_null() {
+                    std::ptr::copy_nonoverlapping(wtext.as_ptr(), pt as *mut u16, wtext.len());
+                    GlobalUnlock(ht);
+                    if SetClipboardData(CF_UNICODETEXT, ht).is_null() {
+                        GlobalFree(ht);
+                    }
+                } else {
+                    GlobalFree(ht);
+                }
+            }
+            Ok(())
+        })();
+        CloseClipboard();
+        result
+    }
+}
+
+// macOS：NSPasteboard 同时声明 NSFilenamesPboardType + NSStringPboardType
+#[cfg(target_os = "macos")]
+fn set_clipboard_files_platform(paths: &[String], text: &str) -> Result<(), String> {
+    if mac_front::set_files(paths, text) {
+        Ok(())
+    } else {
+        Err("写入 NSPasteboard 失败".to_string())
+    }
+}
+
+#[cfg(not(any(target_family = "windows", target_os = "macos")))]
+fn set_clipboard_files_platform(_paths: &[String], _text: &str) -> Result<(), String> {
+    Err("当前平台不支持粘贴文件".to_string())
+}
+
+// 写文件到剪贴板的安全入口：与 set_clipboard_by_id_safe 同理，
+// 持 CLIPBOARD_LOCK 与监听线程互斥；macOS 上 NSPasteboard 调度到主线程执行。
+fn set_clipboard_files_safe(app: &AppHandle, paths: &[String], text: &str) -> Result<(), String> {
+    let _guard = CLIPBOARD_LOCK.lock().unwrap();
+    #[cfg(target_os = "macos")]
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let paths = paths.to_vec();
+        let text = text.to_string();
+        app.run_on_main_thread(move || {
+            let _ = tx.send(set_clipboard_files_platform(&paths, &text));
+        })
+        .map_err(|e| format!("调度主线程失败: {e}"))?;
+        rx.recv().map_err(|_| "主线程写剪贴板无响应".to_string())?
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        set_clipboard_files_platform(paths, text)
+    }
 }
 
 // ---------- Windows 原生图片兜底 ----------
@@ -1022,6 +1165,14 @@ impl Cand {
 }
 
 fn read_clipboard(cb: &mut Clipboard) -> Option<Cand> {
+    // macOS：访达 ⌘C 文件时剪贴板除文件 URL 外还常带文件名/路径字符串，
+    // 必须先判文件列表，否则文件会被当成纯文本入库
+    #[cfg(target_os = "macos")]
+    if let Some(files) = clipboard_files() {
+        let joined = files.join("\n");
+        let h = hash_bytes(joined.as_bytes());
+        return Some(Cand::File(joined, h));
+    }
     if let Ok(text) = cb.get_text() {
         let text = text.trim_end_matches('\0').to_string();
         if !text.is_empty() {
@@ -1565,6 +1716,80 @@ mod mac_front {
             msg1::<bool, usize>(app, sel("activateWithOptions:"), 1 << 1)
         })
     }
+
+    // ---------- NSPasteboard 文件列表读写（「粘贴文件」/ 访达拷贝检测） ----------
+
+    unsafe fn msg2<R, A, B>(receiver: Id, op: Id, a: A, b: B) -> R {
+        let f: unsafe extern "C" fn(Id, Id, A, B) -> R =
+            std::mem::transmute(objc_msgSend as *const c_void);
+        f(receiver, op, a, b)
+    }
+
+    fn ns_string(s: &str) -> Id {
+        // 路径不含 NUL；unwrap_or_else 保底返回空字符串
+        let c = CString::new(s).unwrap_or_else(|_| CString::new("").unwrap());
+        unsafe { msg1(class("NSString"), sel("stringWithUTF8String:"), c.as_ptr()) }
+    }
+
+    fn ns_array(items: &[Id]) -> Id {
+        unsafe {
+            let arr: Id = msg0(
+                msg0::<Id>(class("NSMutableArray"), sel("alloc")),
+                sel("init"),
+            );
+            for &it in items {
+                msg1::<(), Id>(arr, sel("addObject:"), it);
+            }
+            arr
+        }
+    }
+
+    /// 写入文件列表 + 纯文本路径双格式：聊天框/访达拿文件，文本框拿路径。
+    /// 用 declareTypes + setPropertyList(NSFilenamesPboardType) 而非 writeObjects：
+    /// 同一剪贴板项共存两种格式，且访达/老应用对 legacy 类型支持最稳。
+    pub fn set_files(paths: &[String], text: &str) -> bool {
+        with_pool(|| unsafe {
+            let pb: Id = msg0(class("NSPasteboard"), sel("generalPasteboard"));
+            if pb.is_null() {
+                return false;
+            }
+            let t_files = ns_string("NSFilenamesPboardType");
+            let t_str = ns_string("NSStringPboardType");
+            let types = ns_array(&[t_files, t_str]);
+            msg2::<i64, Id, Id>(pb, sel("declareTypes:owner:"), types, std::ptr::null_mut());
+            let path_objs: Vec<Id> = paths.iter().map(|p| ns_string(p)).collect();
+            let arr = ns_array(&path_objs);
+            let ok1 = msg2::<bool, Id, Id>(pb, sel("setPropertyList:forType:"), arr, t_files);
+            // 文本兜底失败可容忍，文件格式已可用
+            let _ = msg2::<bool, Id, Id>(pb, sel("setString:forType:"), ns_string(text), t_str);
+            ok1
+        })
+    }
+
+    /// 读取剪贴板中的文件路径列表（访达 ⌘C 拷贝文件/文件夹）。
+    /// NSFilenamesPboardType 与现代 NSPasteboardTypeFileURL 由系统自动互转。
+    pub fn copied_files() -> Option<Vec<String>> {
+        with_pool(|| unsafe {
+            let pb: Id = msg0(class("NSPasteboard"), sel("generalPasteboard"));
+            if pb.is_null() {
+                return None;
+            }
+            let t_files = ns_string("NSFilenamesPboardType");
+            let arr: Id = msg1(pb, sel("propertyListForType:"), t_files);
+            if arr.is_null() {
+                return None;
+            }
+            let count = msg0::<usize>(arr, sel("count"));
+            let mut out = Vec::new();
+            for i in 0..count {
+                let s: Id = msg1(arr, sel("objectAtIndex:"), i);
+                if let Some(p) = ns_to_string(s) {
+                    out.push(p);
+                }
+            }
+            (!out.is_empty()).then_some(out)
+        })
+    }
 }
 
 // macOS：读取当前前台 App 的 pid 与 bundle id（NSWorkspace，无需额外权限）。
@@ -1724,9 +1949,57 @@ fn paste_clip(state: State<AppState>, app: AppHandle, id: i64) -> Result<(), Str
     }
     // 剪贴板内容立即更新
     set_clipboard_by_id_safe(&app, id)?;
+    *state.paste_file_mode.lock().unwrap() = false;
     *state.paste_pending.lock().unwrap() = true;
 
     // 已有粘贴 worker 在跑：标记排队即可，它完成后会立刻补下一次
+    if state.paste_running.swap(true, Ordering::SeqCst) {
+        return Ok(());
+    }
+    let app2 = app.clone();
+    std::thread::spawn(move || paste_worker(app2));
+    Ok(())
+}
+
+// 「粘贴文件」：把文件列表以 文件格式+纯文本路径 双格式写入剪贴板再模拟粘贴。
+// 聊天发送框/资源管理器/访达拿到文件本身；不支持文件的目标（文本框）拿到完整路径，
+// 即「粘贴不成功就粘贴地址」的兜底由双格式自动完成，无需检测粘贴结果。
+#[tauri::command]
+fn paste_clip_file(state: State<AppState>, app: AppHandle, id: i64) -> Result<(), String> {
+    // 先校验再动面板：文件已不存在等错误要原样弹在面板上，不能先隐藏
+    let paths: Vec<String> = {
+        let db = state.db.lock().unwrap();
+        let (kind, content) = db
+            .query_row(
+                "SELECT kind, content FROM clips WHERE id=?1",
+                params![id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+            )
+            .map_err(|e| e.to_string())?;
+        if kind != "file" {
+            return Err("该记录不是文件".to_string());
+        }
+        content
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| l.to_string())
+            .collect()
+    };
+    if paths.is_empty() {
+        return Err("文件路径为空".to_string());
+    }
+    if let Some(missing) = paths.iter().find(|p| !std::path::Path::new(p).exists()) {
+        return Err(format!("文件已不存在: {missing}"));
+    }
+    if !state.panel_pinned.load(Ordering::SeqCst) {
+        hide_panel_and_yield_focus(&app);
+    }
+    let text = paths.join("\n");
+    set_clipboard_files_safe(&app, &paths, &text)?;
+    *state.paste_file_mode.lock().unwrap() = true;
+    *state.paste_pending.lock().unwrap() = true;
+
     if state.paste_running.swap(true, Ordering::SeqCst) {
         return Ok(());
     }
@@ -1746,6 +2019,12 @@ fn paste_worker(app: AppHandle) {
             }
             *p = false;
         }
+        // 取本次粘贴模式并复位（普通粘贴=文本/图片，文件粘贴=双格式写文件）
+        #[cfg(target_os = "macos")]
+        let file_mode = std::mem::replace(&mut *state.paste_file_mode.lock().unwrap(), false);
+        #[cfg(not(target_os = "macos"))]
+        let _file_mode_consumed =
+            std::mem::replace(&mut *state.paste_file_mode.lock().unwrap(), false);
         // 面板已在 paste_clip 里隐藏，这里只需把焦点还给之前的窗口
         let hwnd = *state.prev_hwnd.lock().unwrap();
         if hwnd != 0 {
@@ -1792,9 +2071,10 @@ fn paste_worker(app: AppHandle) {
                         &app,
                         &format!("frontmost timeout: target={target} actual={now_front:?}"),
                     );
-                    if now_front.as_deref() == Some("com.apple.finder") {
+                    if !file_mode && now_front.as_deref() == Some("com.apple.finder") {
                         // 超时且前台仍是访达：⌘V 必生成剪贴文件，跳过模拟按键
-                        //（剪贴板已更新，用户可手动 ⌘V）
+                        //（剪贴板已更新，用户可手动 ⌘V）。
+                        // 文件模式不拦截：粘贴文件到访达窗口是合法操作（复制进该文件夹）
                         paste_debug(&app, "skip: finder frontmost");
                         continue;
                     }
@@ -1806,7 +2086,7 @@ fn paste_worker(app: AppHandle) {
                 std::thread::sleep(Duration::from_millis(150));
                 let now_front = frontmost_bundle();
                 paste_debug(&app, &format!("no target, frontmost={now_front:?}"));
-                if now_front.as_deref() == Some("com.apple.finder") {
+                if !file_mode && now_front.as_deref() == Some("com.apple.finder") {
                     paste_debug(&app, "skip: finder frontmost (no target)");
                     continue;
                 }
@@ -1819,11 +2099,11 @@ fn paste_worker(app: AppHandle) {
         {
             let role = focused_element_role();
             paste_debug(&app, &format!("ax role={role:?}"));
-            if frontmost_bundle().as_deref() == Some("com.apple.finder") {
+            if !file_mode && frontmost_bundle().as_deref() == Some("com.apple.finder") {
                 paste_debug(&app, "skip: finder frontmost (final check)");
                 continue;
             }
-            paste_debug(&app, "simulate ⌘V");
+            paste_debug(&app, &format!("simulate ⌘V (file_mode={file_mode})"));
         }
         simulate_paste_safe(&app);
     }
@@ -3039,6 +3319,7 @@ pub fn run() {
                 tray_toggle: Mutex::new(None),
                 paste_pending: Mutex::new(false),
                 paste_running: AtomicBool::new(false),
+                paste_file_mode: Mutex::new(false),
                 prev_hwnd: Mutex::new(0),
                 #[cfg(target_os = "macos")]
                 prev_front_app: Mutex::new(FrontApp::default()),
@@ -3217,6 +3498,7 @@ pub fn run() {
             toggle_pin,
             copy_clip,
             paste_clip,
+            paste_clip_file,
             hide_panel,
             count_pinned_in_range,
             delete_range,

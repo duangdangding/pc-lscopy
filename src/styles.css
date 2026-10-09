@@ -275,7 +275,8 @@ body {
 .clip-del,
 .clip-pin,
 .clip-view,
-.clip-web {
+.clip-web,
+.clip-filepaste {
   background: none;
   border: none;
   color: var(--text-dim);
@@ -286,7 +287,8 @@ body {
 }
 
 .clip-view:hover,
-.clip-web:hover {
+.clip-web:hover,
+.clip-filepaste:hover {
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
@@ -1159,7 +1161,8 @@ input[type="radio"] {
 .clip-del,
 .clip-pin,
 .clip-view,
-.clip-web {
+.clip-web,
+.clip-filepaste {
   display: inline-flex;
   align-items: center;
   justify-content: center;
