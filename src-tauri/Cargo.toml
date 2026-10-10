@@ -1,6 +1,6 @@
 [package]
 name = "lscopy"
-version = "1.7.0"
+version = "1.7.1"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -52,6 +52,8 @@ window-vibrancy = "0.8"
 hkdf = "0.12"
 aes-gcm = "0.10"
 rand = "0.8"
+# 搜索支持中文全拼/首拼：入库时生成拼音检索列（只保留无声调数据表）
+pinyin = { version = "0.10", default-features = false, features = ["plain"] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"

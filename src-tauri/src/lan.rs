@@ -2143,10 +2143,11 @@ pub(crate) fn store_remote(
         );
         return false;
     }
+    let (py_full, py_abbr) = content.map(crate::pinyin_strings).unwrap_or_default();
     db.execute(
-        "INSERT INTO clips(kind, content, image, width, height, hash, created_at, remote_device_id, remote_id)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        params![kind, content, image, width, height, h64, created_at, remote_device_id, remote_id],
+        "INSERT INTO clips(kind, content, image, width, height, hash, created_at, remote_device_id, remote_id, pinyin_full, pinyin_abbr)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![kind, content, image, width, height, h64, created_at, remote_device_id, remote_id, py_full, py_abbr],
     )
     .is_ok()
 }

@@ -407,6 +407,55 @@ pub(crate) fn hash_bytes(data: &[u8]) -> u64 {
     h.finish()
 }
 
+// ---------- 拼音检索列（搜索支持全拼 / 首拼） ----------
+
+// 为文本内容生成拼音检索串：
+// - full：中文字符转无声调全拼（如「你好」→ nihao），非中文字符原样小写保留，跨边界可连续匹配
+// - abbr：中文字符取拼音首字母（如「你好」→ nh），非中文字符同样原样小写
+// 多音字取第一个读音；超过 3000 字的部分不索引（搜索词通常远短于此，避免超大文本拖慢入库）
+const PINYIN_INDEX_MAX_CHARS: usize = 3000;
+
+pub(crate) fn pinyin_strings(text: &str) -> (String, String) {
+    use pinyin::ToPinyin;
+    let mut full = String::new();
+    let mut abbr = String::new();
+    for ch in text.chars().take(PINYIN_INDEX_MAX_CHARS) {
+        match ch.to_pinyin() {
+            Some(py) => {
+                let p = py.plain();
+                full.push_str(p);
+                if let Some(c) = p.chars().next() {
+                    abbr.push(c);
+                }
+            }
+            None => {
+                let c = ch.to_ascii_lowercase();
+                full.push(c);
+                abbr.push(c);
+            }
+        }
+    }
+    (full, abbr)
+}
+
+// 老库迁移：为已有文本记录回填拼音检索列
+fn backfill_pinyin(conn: &Connection) {
+    let rows: Vec<(i64, String)> = conn
+        .prepare("SELECT id, content FROM clips WHERE content IS NOT NULL AND pinyin_full IS NULL")
+        .and_then(|mut s| {
+            let mapped = s.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            Ok(mapped.filter_map(|r| r.ok()).collect())
+        })
+        .unwrap_or_default();
+    for (id, content) in rows {
+        let (full, abbr) = pinyin_strings(&content);
+        let _ = conn.execute(
+            "UPDATE clips SET pinyin_full = ?2, pinyin_abbr = ?3 WHERE id = ?1",
+            params![id, full, abbr],
+        );
+    }
+}
+
 // 软件所在目录（Windows 便携模式的默认数据位置）
 pub(crate) fn exe_dir() -> PathBuf {
     std::env::current_exe()
@@ -491,6 +540,15 @@ fn init_db(path: &PathBuf) -> Result<Connection, String> {
         )
         .map_err(|e| e.to_string())?;
     }
+    // 旧版本库迁移：拼音检索列（搜索支持全拼/首拼），补列后回填已有文本记录
+    if conn.prepare("SELECT pinyin_full FROM clips LIMIT 1").is_err() {
+        conn.execute_batch(
+            "ALTER TABLE clips ADD COLUMN pinyin_full TEXT;
+             ALTER TABLE clips ADD COLUMN pinyin_abbr TEXT;",
+        )
+        .map_err(|e| e.to_string())?;
+        backfill_pinyin(&conn);
+    }
     Ok(conn)
 }
 
@@ -541,10 +599,11 @@ fn store_clip(
         );
         return true;
     }
+    let (py_full, py_abbr) = content.map(pinyin_strings).unwrap_or_default();
     db.execute(
-        "INSERT INTO clips(kind, content, image, width, height, hash, created_at)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![kind, content, image, width, height, h64, now_secs()],
+        "INSERT INTO clips(kind, content, image, width, height, hash, created_at, pinyin_full, pinyin_abbr)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![kind, content, image, width, height, h64, now_secs(), py_full, py_abbr],
     )
     .is_ok()
 }
@@ -1326,8 +1385,10 @@ fn list_clips(state: State<AppState>, keyword: Option<String>) -> Vec<Clip> {
     // 列表查询不读取 image blob，图片由前端懒加载（get_clip_image），避免大数据量卡顿
     let (sql, kw): (&str, Option<String>) = match &keyword {
         Some(k) if !k.trim().is_empty() => (
+            // 拼音列在入库时生成（中文转无声调全拼/首字母，其余字符小写），
+            // SQLite LIKE 对 ASCII 不区分大小写，大写输入也能命中
             "SELECT id, kind, content, width, height, pinned, created_at FROM clips
-             WHERE content LIKE ?1
+             WHERE content LIKE ?1 OR pinyin_full LIKE ?1 OR pinyin_abbr LIKE ?1
              ORDER BY pinned DESC, created_at DESC LIMIT 500",
             Some(format!("%{}%", k.trim())),
         ),
@@ -2689,10 +2750,11 @@ fn import_clips(state: State<AppState>, path: String) -> Result<i64, String> {
         if exists {
             continue;
         }
+        let (py_full, py_abbr) = c.content.as_deref().map(pinyin_strings).unwrap_or_default();
         let r = db.execute(
-            "INSERT INTO clips(kind, content, image, width, height, pinned, hash, created_at)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![c.kind, c.content, img, c.width, c.height, c.pinned as i64, h as i64, c.created_at],
+            "INSERT INTO clips(kind, content, image, width, height, pinned, hash, created_at, pinyin_full, pinyin_abbr)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![c.kind, c.content, img, c.width, c.height, c.pinned as i64, h as i64, c.created_at, py_full, py_abbr],
         );
         if r.is_ok() {
             count += 1;
