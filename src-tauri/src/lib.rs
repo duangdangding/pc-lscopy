@@ -311,6 +311,7 @@ struct Clip {
     url: Option<String>,       // 内容中的第一个网址
     pinned: bool,
     created_at: i64,           // 秒级时间戳
+    match_ranges: Vec<(u32, u32)>, // 搜索命中区间（码点索引，左闭右开），前端高亮用；无搜索词时为空
 }
 
 // 提取文本中的第一个 http(s) 网址
@@ -454,6 +455,73 @@ fn backfill_pinyin(conn: &Connection) {
             params![id, full, abbr],
         );
     }
+}
+
+// 搜索命中区间（字符/码点索引，左闭右开），供前端高亮：
+// 1. 优先取关键词在预览文本中的直接命中（不区分大小写，标出所有出现位置）；
+// 2. 无直接命中且关键词为纯 ASCII 字母数字时回退拼音匹配——把命中在拼音串中的
+//    字节位置映射回预览字符区间（命中半个音节按整字高亮；全拼优先于首拼）
+fn match_ranges(preview: &str, keyword: &str) -> Vec<(u32, u32)> {
+    use pinyin::ToPinyin;
+    let kw = keyword.trim().to_lowercase();
+    if kw.is_empty() {
+        return vec![];
+    }
+    // 直接命中（可能多处；码点索引与前端 Array.from 的口径一致）
+    let lower = preview.to_lowercase();
+    let kw_chars = kw.chars().count() as u32;
+    let mut ranges: Vec<(u32, u32)> = Vec::new();
+    let mut start = 0usize;
+    while let Some(pos) = lower[start..].find(&kw) {
+        let b0 = start + pos;
+        let c0 = lower[..b0].chars().count() as u32;
+        ranges.push((c0, c0 + kw_chars));
+        start = b0 + kw.len();
+        if ranges.len() >= 50 {
+            break;
+        }
+    }
+    if !ranges.is_empty() {
+        return ranges;
+    }
+    // 关键词含中文/符号时拼音串不可能命中，跳过逐字转换
+    if !kw.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return vec![];
+    }
+    // 逐字生成全拼/首拼，并记录每个字符的全拼在串中的字节边界
+    let mut full = String::new();
+    let mut abbr = String::new();
+    let mut bounds: Vec<usize> = Vec::new();
+    for ch in preview.chars() {
+        bounds.push(full.len());
+        match ch.to_pinyin() {
+            Some(py) => {
+                let p = py.plain();
+                full.push_str(p);
+                if let Some(c) = p.chars().next() {
+                    abbr.push(c);
+                }
+            }
+            None => {
+                let c = ch.to_ascii_lowercase();
+                full.push(c);
+                abbr.push(c);
+            }
+        }
+    }
+    bounds.push(full.len());
+    if let Some(pos) = full.find(&kw) {
+        let end = pos + kw.len();
+        let c0 = bounds.partition_point(|&b| b <= pos) - 1;
+        let c1 = bounds.partition_point(|&b| b < end); // b <= end-1 ⟺ b < end
+        return vec![(c0 as u32, c1 as u32)];
+    }
+    if let Some(pos) = abbr.find(&kw) {
+        // 首拼串每个源字符恰好贡献 1 个字符（非 ASCII 字符按 chars 计数换算）
+        let c0 = abbr[..pos].chars().count() as u32;
+        return vec![(c0, c0 + kw_chars)];
+    }
+    vec![]
 }
 
 // 软件所在目录（Windows 便携模式的默认数据位置）
@@ -1402,6 +1470,8 @@ fn list_clips(state: State<AppState>, keyword: Option<String>) -> Vec<Clip> {
         Ok(s) => s,
         Err(_) => return vec![],
     };
+    // 原始关键词（去空格），供逐行计算高亮区间；拼音回退只对没有直接命中的行做逐字转换
+    let kw_raw = keyword.as_deref().map(str::trim).filter(|s| !s.is_empty());
     let map_row = |row: &rusqlite::Row| -> rusqlite::Result<Clip> {
         let kind: String = row.get(1)?;
         let content: Option<String> = row.get(2)?;
@@ -1432,6 +1502,10 @@ fn list_clips(state: State<AppState>, keyword: Option<String>) -> Vec<Clip> {
             let t = content.unwrap_or_default();
             t.chars().take(300).collect()
         };
+        let match_ranges = match kw_raw {
+            Some(k) => match_ranges(&preview, k),
+            None => vec![],
+        };
         Ok(Clip {
             id: row.get(0)?,
             category,
@@ -1441,6 +1515,7 @@ fn list_clips(state: State<AppState>, keyword: Option<String>) -> Vec<Clip> {
             url,
             pinned: row.get::<_, i64>(5)? != 0,
             created_at: row.get(6)?,
+            match_ranges,
         })
     };
     let rows = match kw {

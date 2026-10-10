@@ -207,6 +207,14 @@ body {
   user-select: text;
 }
 
+/* 搜索命中高亮：跟随主题 accent，深色/浅色与自定义主题都成立 */
+.clip-text mark {
+  background: color-mix(in srgb, var(--accent) 32%, transparent);
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 1px;
+}
+
 .clip-thumb {
   max-width: 100%;
   height: 64px;

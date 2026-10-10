@@ -20,6 +20,7 @@ interface Clip {
   url: string | null;
   pinned: boolean;
   created_at: number; // 秒
+  match_ranges: [number, number][]; // 搜索命中区间（码点索引，左闭右开），高亮用
 }
 
 const listEl = document.querySelector<HTMLDivElement>("#list")!;
@@ -141,6 +142,27 @@ function fmtTime(ts: number): string {
   return `${d.getMonth() + 1}/${d.getDate()} ${hh}:${mm}`;
 }
 
+// 渲染预览文本：有搜索命中区间时把命中片段包进 <mark> 高亮（区间是码点索引，用 Array.from 对齐）
+function renderPreview(el: HTMLElement, c: Clip) {
+  const ranges = c.match_ranges;
+  if (!ranges || !ranges.length) {
+    el.textContent = c.preview;
+    return;
+  }
+  const chars = Array.from(c.preview);
+  let cur = 0;
+  for (const [s, e] of ranges) {
+    if (s > cur) el.append(document.createTextNode(chars.slice(cur, s).join("")));
+    const mark = document.createElement("mark");
+    mark.textContent = chars.slice(s, e).join("");
+    el.append(mark);
+    cur = Math.max(cur, e);
+  }
+  if (cur < chars.length) {
+    el.append(document.createTextNode(chars.slice(cur).join("")));
+  }
+}
+
 function updateHint() {
   const hk = formatHotkey(config?.hotkey || DEFAULT_HOTKEY);
   hintEl.textContent = panelPinned
@@ -245,7 +267,7 @@ async function refresh(keepSelection = false) {
     } else {
       const p = document.createElement("div");
       p.className = "clip-text";
-      p.textContent = c.preview;
+      renderPreview(p, c);
       body.appendChild(p);
     }
 
