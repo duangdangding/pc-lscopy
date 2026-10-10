@@ -22,6 +22,9 @@ const themeEl = $<HTMLSelectElement>("#theme");
 const windowEffectEl = $<HTMLSelectElement>("#window-effect");
 const fontFamilyEl = $<HTMLInputElement>("#font-family");
 const fontSizeEl = $<HTMLInputElement>("#font-size");
+const highlightColorEl = $<HTMLInputElement>("#highlight-color");
+const highlightFollowEl = $<HTMLInputElement>("#highlight-follow");
+const hlPreviewMarkEl = $<HTMLElement>("#hl-preview-mark");
 const maxItemsEl = $<HTMLInputElement>("#max-items");
 const retentionValueEl = $<HTMLInputElement>("#retention-value");
 const retentionUnitEl = $<HTMLSelectElement>("#retention-unit");
@@ -961,12 +964,29 @@ function markDirty() {
   hotkeyEl, enabledEl, autostartEl, silentStartEl, rememberSizeEl,
   followCursorMonitorEl, dbDirEl, configDirEl, themeEl, fontFamilyEl,
   fontSizeEl, maxItemsEl, retentionValueEl, retentionUnitEl, excludeAppsEl,
+  highlightColorEl, highlightFollowEl,
 ].forEach((el) => {
   el.addEventListener("input", markDirty);
   el.addEventListener("change", markDirty);
 });
 // 初始无改动，按钮不可用
 saveBtn.disabled = true;
+
+// 「跟随主题强调色」勾选时禁用取色器（保留颜色值，取消勾选即恢复）
+highlightFollowEl.addEventListener("change", () => {
+  highlightColorEl.disabled = highlightFollowEl.checked;
+});
+
+// 高亮颜色实时预览：只写预览 mark 的局部变量，不影响未保存的全局外观
+function updateHlPreview() {
+  if (highlightFollowEl.checked) {
+    hlPreviewMarkEl.style.removeProperty("--hl-preview");
+  } else {
+    hlPreviewMarkEl.style.setProperty("--hl-preview", highlightColorEl.value);
+  }
+}
+highlightColorEl.addEventListener("input", updateHlPreview);
+highlightFollowEl.addEventListener("change", updateHlPreview);
 
 $("#btn-save").addEventListener("click", async () => {
   const nextConfigDir = configDirEl.value.trim() || null;
@@ -1002,6 +1022,8 @@ $("#btn-save").addEventListener("click", async () => {
     background: config.background,
     font_family: fontFamilyEl.value.trim(),
     font_size: Math.max(10, Math.min(24, Number(fontSizeEl.value) || 14)),
+    // 勾选「跟随主题强调色」时存空串，主面板回退到 --accent
+    highlight_color: highlightFollowEl.checked ? "" : highlightColorEl.value,
     exclude_apps: excludeAppsEl.value
       .split(/\r?\n/)
       .map((s) => s.trim())
@@ -1751,6 +1773,12 @@ async function initBackground() {
   configDirEl.value = config.config_dir || "";
   themeEl.value = config.theme;
   windowEffectEl.value = config.window_effect || "default";
+  // 搜索高亮颜色：空 = 跟随主题强调色（勾选框勾上、取色器禁用但保留上次颜色）
+  const hl = (config.highlight_color || "").trim();
+  highlightFollowEl.checked = !hl;
+  highlightColorEl.value = /^#[0-9a-fA-F]{6}$/.test(hl) ? hl : "#89b4fa";
+  highlightColorEl.disabled = !hl;
+  updateHlPreview();
   fontFamilyEl.value = config.font_family;
   fontSizeEl.value = String(config.font_size || 14);
   maxItemsEl.value = String(config.max_items);

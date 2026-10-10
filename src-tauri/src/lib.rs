@@ -101,6 +101,7 @@ pub struct AppConfig {
     pub follow_cursor_monitor: bool, // 多显示器：唤起时面板跟随光标所在屏幕
     pub window_effect: String,       // 主面板窗口材质："default" | "acrylic" | "vibrancy" | "mica"
     pub background: BackgroundConfig, // 面板背景图设置
+    pub highlight_color: String,     // 搜索命中高亮颜色（#rrggbb）；空 = 跟随主题强调色
 }
 
 /// 默认全局快捷键：全平台统一 Ctrl+`（mac 上即 Control+`）
@@ -147,6 +148,7 @@ impl Default for AppConfig {
             follow_cursor_monitor: true,
             window_effect: "default".into(),
             background: BackgroundConfig::default(),
+            highlight_color: String::new(),
         }
     }
 }

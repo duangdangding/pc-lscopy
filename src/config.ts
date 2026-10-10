@@ -42,6 +42,7 @@ export interface AppConfig {
   follow_cursor_monitor: boolean; // 多显示器：唤起时面板跟随光标所在屏幕
   window_effect: string; // 主面板窗口材质："default" | "acrylic" | "vibrancy" | "mica"
   background: BackgroundConfig; // 面板背景图设置
+  highlight_color: string; // 搜索命中高亮颜色（#rrggbb）；空 = 跟随主题强调色
 }
 
 export async function loadConfig(): Promise<AppConfig> {
@@ -172,6 +173,13 @@ export function applyAppearance(cfg: AppConfig) {
     cfg.font_family?.trim() || "Segoe UI, Microsoft YaHei, system-ui, sans-serif"
   );
   root.style.setProperty("--app-font-size", `${cfg.font_size || 14}px`);
+  // 搜索命中高亮颜色：仅接受 #rrggbb（设置页 color input 保证格式，这里兜底防脏配置注入 CSS）
+  const hl = (cfg.highlight_color || "").trim();
+  if (/^#[0-9a-fA-F]{6}$/.test(hl)) {
+    root.style.setProperty("--hl-color", hl);
+  } else {
+    root.style.removeProperty("--hl-color"); // 空/非法 = 跟随主题强调色
+  }
 }
 
 /**

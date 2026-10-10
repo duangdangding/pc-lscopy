@@ -79,7 +79,12 @@
             <label class="field">字号
               <input id="font-size" type="number" min="10" max="24" value="14" />
             </label>
+            <label class="field">搜索高亮颜色
+              <input id="highlight-color" type="color" value="#89b4fa" />
+            </label>
+            <label class="check hl-follow"><input id="highlight-follow" type="checkbox" checked /> 跟随主题强调色</label>
           </div>
+          <p class="desc hl-preview">预览：搜索 <code>nh</code> 命中「<mark id="hl-preview-mark">你好</mark>」，改动即时反映在这里；保存后面板内生效。</p>
           <div class="row">
             <label class="field">窗口效果（选择后立即生效）
               <select id="window-effect">
