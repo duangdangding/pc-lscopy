@@ -20,6 +20,7 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut}
 use tauri_plugin_opener::OpenerExt;
 
 mod lan;
+mod lock;
 mod relay;
 
 // macOS 的 NSPasteboard 不是线程安全的：后台线程读写会与应用主线程（WebKit 周期性
@@ -153,13 +154,14 @@ impl Default for AppConfig {
     }
 }
 
-/// 合并后的配置文件结构：通用设置 + 局域网同步设置 + 云端中继设置保存在同一个 JSON
+/// 合并后的配置文件结构：通用设置 + 局域网同步设置 + 云端中继设置 + 安全锁定设置保存在同一个 JSON
 #[derive(Serialize, Deserialize, Default)]
 #[serde(default)]
 struct ConfigFile {
     app: AppConfig,
     lan: lan::LanSettings,
     relay: relay::RelaySettings,
+    lock: lock::LockSettings,
 }
 
 /// 配置文件目录指针文件：内容是配置文件所在目录（空 = 默认数据目录）。
@@ -200,18 +202,20 @@ fn effective_config_file(cfg: &AppConfig) -> PathBuf {
         .join("lscopy-config.json")
 }
 
-/// 解析配置文件文本为（通用设置, 局域网设置, 中继设置）。
+/// 解析配置文件文本为（通用设置, 局域网设置, 中继设置, 锁定设置）。
 /// 兼容旧格式：扁平的 AppConfig JSON（局域网设置再从旧 lscopy-lan.json 读）。
-fn load_config_full(raw: Option<&str>) -> (AppConfig, lan::LanSettings, relay::RelaySettings) {
+fn load_config_full(
+    raw: Option<&str>,
+) -> (AppConfig, lan::LanSettings, relay::RelaySettings, lock::LockSettings) {
     if let Some(text) = raw {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
             if v.get("app").is_some() || v.get("lan").is_some() || v.get("relay").is_some() {
-                // 新格式：{ "app": {...}, "lan": {...}, "relay": {...} }（各字段缺失时按默认值填充）
+                // 新格式：{ "app": {...}, "lan": {...}, "relay": {...}, "lock": {...} }（各字段缺失时按默认值填充）
                 if let Ok(mut cf) = serde_json::from_value::<ConfigFile>(v) {
                     cf.lan = lan::parse_settings(
                         serde_json::to_string(&cf.lan).ok().as_deref(),
                     );
-                    return (cf.app, cf.lan, cf.relay);
+                    return (cf.app, cf.lan, cf.relay, cf.lock);
                 }
             } else {
                 // 旧格式：整个文件就是 AppConfig
@@ -222,6 +226,7 @@ fn load_config_full(raw: Option<&str>) -> (AppConfig, lan::LanSettings, relay::R
                     app,
                     lan::parse_settings(lan_raw.as_deref()),
                     relay::RelaySettings::default(),
+                    lock::LockSettings::default(),
                 );
             }
         }
@@ -230,17 +235,19 @@ fn load_config_full(raw: Option<&str>) -> (AppConfig, lan::LanSettings, relay::R
         AppConfig::default(),
         lan::parse_settings(None),
         relay::RelaySettings::default(),
+        lock::LockSettings::default(),
     )
 }
 
-/// 把「通用设置 + 局域网设置 + 中继设置」合并写入配置文件。
-/// 锁顺序固定：config → lan.settings → relay.settings → config_file，各调用点不得反向加锁。
+/// 把「通用设置 + 局域网设置 + 中继设置 + 锁定设置」合并写入配置文件。
+/// 锁顺序固定：config → lan.settings → relay.settings → lock → config_file，各调用点不得反向加锁。
 pub(crate) fn persist_config(state: &AppState) -> Result<(), String> {
     let app = state.config.lock().unwrap().clone();
     let lan = state.lan.settings.lock().unwrap().clone();
     let relay = state.relay.settings.lock().unwrap().clone();
+    let lock = state.lock.lock().unwrap().clone();
     let path = state.config_file.lock().unwrap().clone();
-    let cf = ConfigFile { app, lan, relay };
+    let cf = ConfigFile { app, lan, relay, lock };
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
@@ -370,6 +377,14 @@ struct AppState {
     last_seen: Mutex<u64>,
     // 托盘「开启记录」勾选项，用于跨界面同步勾选状态
     tray_toggle: Mutex<Option<tauri::menu::CheckMenuItem<tauri::Wry>>>,
+    // 托盘「立即锁定」菜单项（未启用锁定时置灰）
+    tray_lock: Mutex<Option<tauri::menu::MenuItem<tauri::Wry>>>,
+    // 安全锁定设置（密码哈希/解锁组合键/自动锁定分钟），随配置文件 "lock" 键落盘
+    pub(crate) lock: Mutex<lock::LockSettings>,
+    // 当前是否处于锁定状态（true 时各窗口被锁定遮罩覆盖）
+    pub(crate) locked: AtomicBool,
+    // 上次解锁（或启动）时刻（秒）：自动锁定计时的起点
+    unlock_epoch: Mutex<i64>,
     // 粘贴防抖：连点时合并为一次粘贴
     paste_pending: Mutex<bool>,
     paste_running: AtomicBool,
@@ -2483,7 +2498,8 @@ fn save_config(
         // 表单里本次的其他改动一并丢弃（前端保存后会重新加载设置页）
         if config_dir_action == "reset" {
             let raw = std::fs::read_to_string(&new_file).ok();
-            let (mut loaded, lan_settings, relay_settings) = load_config_full(raw.as_deref());
+            let (mut loaded, lan_settings, relay_settings, lock_settings) =
+                load_config_full(raw.as_deref());
             // config_dir 以本次指针为准，避免沿用新目录旧文件里记录的目录
             loaded.config_dir = config.config_dir.clone();
             // 新配置的数据库目录可能不同：切换数据库连接
@@ -2492,6 +2508,7 @@ fn save_config(
             *state.db.lock().unwrap() = conn;
             *state.lan.settings.lock().unwrap() = lan_settings;
             *state.relay.settings.lock().unwrap() = relay_settings;
+            *state.lock.lock().unwrap() = lock_settings;
             config = loaded;
         }
     }
@@ -3437,7 +3454,7 @@ pub fn run() {
                 }
             }
             let raw = std::fs::read_to_string(&config_file).ok();
-            let (config, lan_settings, relay_settings) = load_config_full(raw.as_deref());
+            let (config, lan_settings, relay_settings, lock_settings) = load_config_full(raw.as_deref());
             let db_path = effective_db_path(&config);
             if !db_path.exists() {
                 let in_bundle_db = exe_dir().join("lscopy.db");
@@ -3449,6 +3466,8 @@ pub fn run() {
                 }
             }
             let db = init_db(&db_path)?;
+            // 启用了安全锁定时：启动即处于锁定状态（各窗口被锁定遮罩覆盖，解锁后可用）
+            let start_locked = lock_settings.enabled;
             app.manage(AppState {
                 db: Mutex::new(db),
                 config: Mutex::new(config.clone()),
@@ -3456,6 +3475,10 @@ pub fn run() {
                 ignored_hashes: Mutex::new(Vec::new()),
                 last_seen: Mutex::new(0),
                 tray_toggle: Mutex::new(None),
+                tray_lock: Mutex::new(None),
+                lock: Mutex::new(lock_settings),
+                locked: AtomicBool::new(start_locked),
+                unlock_epoch: Mutex::new(now_secs()),
                 paste_pending: Mutex::new(false),
                 paste_running: AtomicBool::new(false),
                 paste_file_mode: Mutex::new(false),
@@ -3484,9 +3507,10 @@ pub fn run() {
             let show = MenuItem::with_id(app, "show", "显示面板", true, None::<&str>)?;
             let toggle = CheckMenuItem::with_id(app, "toggle", "开启剪贴板记录", true, config.enabled, None::<&str>)?;
             let transfer = MenuItem::with_id(app, "transfer", "互传文件", true, None::<&str>)?;
+            let lock_item = MenuItem::with_id(app, "lock", "立即锁定", start_locked, None::<&str>)?;
             let settings = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &toggle, &transfer, &settings, &quit])?;
+            let menu = Menu::with_items(app, &[&show, &toggle, &transfer, &lock_item, &settings, &quit])?;
             TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
@@ -3509,6 +3533,7 @@ pub fn run() {
                             let _ = w.set_focus();
                         }
                     }
+                    "lock" => lock::set_locked(app, true),
                     "quit" => app.exit(0),
                     _ => {}
                 })
@@ -3527,6 +3552,8 @@ pub fn run() {
 
             // 托盘开关存入状态，供其他界面同步勾选
             *app.state::<AppState>().tray_toggle.lock().unwrap() = Some(toggle);
+            // 托盘「立即锁定」菜单项存入状态，随锁定设置启停
+            *app.state::<AppState>().tray_lock.lock().unwrap() = Some(lock_item);
 
             // 全局热键（默认 Ctrl+`）
             register_hotkey(app.handle(), &config.hotkey)?;
@@ -3630,6 +3657,8 @@ pub fn run() {
             lan::start(app.handle());
             // 启动云端中继客户端（按配置连接，未启用时空转等待）
             relay::start(app.handle());
+            // 启动安全锁定模块（自动锁定计时线程）
+            lock::start(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -3697,7 +3726,15 @@ pub fn run() {
             portable_update_apply,
             installer_update_path,
             installer_update_run,
-            http_get_text
+            http_get_text,
+            lock::lock_get_status,
+            lock::lock_set_password,
+            lock::lock_set_shortcut,
+            lock::lock_unlock,
+            lock::lock_now,
+            lock::lock_set_auto_lock,
+            lock::lock_disable,
+            lock::lock_reset
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -39,6 +39,7 @@ src/
   blocked.ts        黑名单窗口逻辑（列表 + 移出黑名单）
   transfer.ts       互传文件窗口逻辑（实时扫描、发送、接收确认队列、传输记录）
   config.ts         前端共享配置
+  lock.ts           安全锁定共享组件（锁定遮罩，四个窗口共用 initLockGuard）
   confirm.ts        确认对话框组件（confirmDialog 二选一 / choiceDialog 多选一）
   styles.css        全局样式
 src-tauri/
@@ -54,6 +55,8 @@ src-tauri/
   src/relay.rs      云端中继客户端（M2）：WSS 长连接、挑战-响应 HMAC 鉴权、
                     本机文本 push、收到 clip 复用 lan::store_remote 入库、
                     指数退避重连、配置代际变更自动重连
+  src/lock.rs       安全锁定：密码（加盐迭代 SHA-256）/ 组合键解锁、
+                    手动锁定、自动锁定计时线程、忘记重置
   src/main.rs       入口（仅调用 lib）
 relay-server/       自建中继服务器（独立 Rust 工程）：WSS 接入、强制鉴权、
                     分组转发、Dockerfile / GHCR 镜像发布 workflow
@@ -143,12 +146,25 @@ cargo clippy           # lint
 - **构建必须走 Tauri CLI**（`bun run tauri build` / `tauri dev`），不要裸 `cargo build --release`：CLI 会开启 `custom-protocol` 特性并正确处理前端资源协议，裸 cargo 构建的 exe 会显示"无法访问页面"。
 - Windows 为主要目标平台；`winreg` 仅 Windows 编译（`cfg(windows)`）。
 - 剪贴板图片读取有 Windows 原生兜底逻辑（CF_BITMAP/CF_DIB），改动相关代码时注意不要回归截图软件兼容性。
-- 配置统一保存在 `lscopy-config.json`（顶层 `app` + `lan` + `relay` 三键），默认数据目录由 `default_data_dir()` 决定：
+- 配置统一保存在 `lscopy-config.json`（顶层 `app` + `lan` + `relay` + `lock` 四键），默认数据目录由 `default_data_dir()` 决定：
   **Windows = exe 同目录**（便携模式）；**macOS = `~/Library/Application Support/com.lsh.lscopy`**
   （mac 更新会整体替换 .app，包内的配置/数据库/目录指针每次更新都会丢，改写包内容还会破坏代码签名）。
   实际目录由默认数据目录下的指针文件 `lscopy-config-dir.txt` 决定（设置页「配置文件」可自定义，
   改动时询问是否迁移旧文件；读取时兼容 exe 同目录的旧指针）。数据库 `lscopy.db` 默认同目录；旧版系统配置目录
-  （`%APPDATA%`）的配置会在首次启动时自动迁移。落盘统一走 `persist_config`（锁顺序固定 config → lan.settings → relay.settings → config_file）。
+  （`%APPDATA%`）的配置会在首次启动时自动迁移。落盘统一走 `persist_config`（锁顺序固定 config → lan.settings → relay.settings → lock → config_file）。
+- **安全锁定**（`src-tauri/src/lock.rs` + 前端共享组件 `src/lock.ts`）：
+  - 锁定设置存配置文件顶层 `lock` 键（`LockSettings`，`#[serde(default)]` 向后兼容）；
+    密码只存随机盐 + 10 万轮迭代 SHA-256 的 hex 哈希（`sha2` / `rand` / `hex` 均已有依赖，勿存明文）；
+    `lock_get_status` 不回传哈希与盐。
+  - 状态在 `AppState`：`lock: Mutex<LockSettings>` / `locked: AtomicBool` / `unlock_epoch`（自动锁定计时起点）；
+    变更统一走 `lock::set_locked`，广播 `lock-state` 事件；自动锁定线程每 2s 检查一次（起点为上次解锁时刻，不随操作顺延）。
+  - 前端四个窗口（main / settings / blocked / transfer）都挂 `initLockGuard()`：锁定遮罩
+    `.lock-overlay`（z-index 90，低于确认弹窗 100——「忘记密码」确认框要点得到）覆盖整个窗口，
+    按模式用密码回车 / 组合键（`comboFromEvent`，与设置页快捷键录制同一套键名规范）解锁；
+    「忘记密码 / 快捷键？」走 `lock_reset` 直接清空锁定设置（本地工具，记录不受影响）。
+  - 解锁组合键要求 ≥2 个修饰键 + 1 个普通键（`valid_shortcut` 校验）；
+    修改密码 / 切换到快捷键模式需验证当前密码；锁定状态下拒绝一切锁定设置变更。
+  - 启用锁定后启动即锁定；托盘「立即锁定」菜单项随锁定启用状态置灰（`tray_lock`）。
 - 主窗口失焦自动隐藏是**延迟 150ms 复查**实现的（拖动/缩放会造成瞬时失焦）；改动窗口事件逻辑时注意 `dragging` / `panel_pinned` / `main_focused` 三个状态。
 - **mac 面板圆角**：macOS 无边框窗口没有系统圆角（Windows 由 DWM 自动圆角），`main.ts` 检测 `isMac` 给 `<html>` 加 `.mac` 类，`styles.css` 把背景与圆角移到 `.app` 并 overflow 裁切（body 背景会传播到画布、不受圆角裁切，必须清掉，用 `!important` 压过主题/材质规则）；固定定位的 `.bg-layer` / `.confirm-overlay` 不受祖先 overflow 裁切，各自带圆角。**前提**：mac 的 transparent 窗口依赖 wry 的 WKWebView 私有 API（`drawsBackground`），必须同时开 `Cargo.toml` 的 tauri feature `macos-private-api` 和 `tauri.conf.json` 的 `app.macOSPrivateApi: true`（tauri-build 会校验两者一致），否则 WebView 保持不透明白底，CSS 裁出的圆角外会露出直角边框。
 - **mac 粘贴链路（焦点恢复 + 防剪贴文件）**：

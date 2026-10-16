@@ -6,6 +6,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { applyAppearance, applyWindowEffect, applyWindowBackground, AppConfig, BackgroundConfig, DEFAULT_HOTKEY, defaultBackground, formatHotkey, isMac, loadConfig, styleBgLayer, watchTabsFade } from "./config";
 import { alertDialog, confirmDialog, choiceDialog } from "./confirm";
+import { initLockGuard, getLockStatus, comboFromEvent, LockStatus } from "./lock";
 import { autoCheckEnabled, checkUpdate, resetUpdateCache, setAutoCheckEnabled, UpdateInfo } from "./updater";
 
 const $ = <T extends HTMLElement>(sel: string) =>
@@ -44,13 +45,14 @@ document.querySelectorAll<HTMLButtonElement>(".tabs .tab").forEach((tab) => {
     panel.hidden = false;
     if (tab.dataset.tab === "data") refreshDbInfo();
     if (tab.dataset.tab === "about") initAboutTab();
+    if (tab.dataset.tab === "lock") refreshLockUi();
     // 「设备同步」页同时包含局域网与中继两块，两个轮询都开
     const onSync = tab.dataset.tab === "sync";
     setLanPolling(onSync);
     setRelayPolling(onSync);
-    // 设备同步页的所有设置即时生效，隐藏底部「保存设置」栏；关于页也不需要
+    // 设备同步 / 安全锁定页的设置都即时生效，隐藏底部「保存设置」栏；关于页也不需要
     document.querySelector<HTMLElement>(".settings-footer")!.hidden =
-      tab.dataset.tab === "sync" || tab.dataset.tab === "about";
+      tab.dataset.tab === "sync" || tab.dataset.tab === "about" || tab.dataset.tab === "lock";
   };
 });
 
@@ -950,6 +952,190 @@ async function refreshDbInfo() {
 }
 $("#db-info-refresh").addEventListener("click", refreshDbInfo);
 
+// ---------- 安全锁定 ----------
+// 本页设置全部即时生效（独立命令，不走底部「保存设置」），与「设备同步」页一致
+const lockPasswordArea = $<HTMLDivElement>("#lock-password-area");
+const lockShortcutArea = $<HTMLDivElement>("#lock-shortcut-area");
+const lockDisableArea = $<HTMLDivElement>("#lock-disable-area");
+const lockOldPasswordRow = $<HTMLDivElement>("#lock-old-password-row");
+const lockOldPasswordRow2 = $<HTMLDivElement>("#lock-old-password-row2");
+const lockOldPasswordEl = $<HTMLInputElement>("#lock-old-password");
+const lockOldPasswordScEl = $<HTMLInputElement>("#lock-old-password-sc");
+const lockNewPasswordEl = $<HTMLInputElement>("#lock-new-password");
+const lockNewPassword2El = $<HTMLInputElement>("#lock-new-password2");
+const lockPasswordSaveBtn = $<HTMLButtonElement>("#lock-password-save");
+const lockShortcutEl = $<HTMLInputElement>("#lock-shortcut");
+const lockDisablePasswordRow = $<HTMLDivElement>("#lock-disable-password-row");
+const lockDisableShortcutRow = $<HTMLDivElement>("#lock-disable-shortcut-row");
+const lockDisablePasswordEl = $<HTMLInputElement>("#lock-disable-password");
+const lockDisableShortcutEl = $<HTMLInputElement>("#lock-disable-shortcut");
+const lockAutoMinutesEl = $<HTMLInputElement>("#lock-auto-minutes");
+
+let lockStatus: LockStatus | null = null;
+
+function lockModeRadios(): HTMLInputElement[] {
+  return Array.from(document.querySelectorAll<HTMLInputElement>('input[name="lock-mode"]'));
+}
+
+function selectedLockMode(): string {
+  return lockModeRadios().find((r) => r.checked)?.value ?? "off";
+}
+
+// 按当前选中的方式显示对应设置区
+function syncLockAreas() {
+  const sel = selectedLockMode();
+  const hasPassword = !!lockStatus?.has_password;
+  const fromPassword = !!lockStatus?.enabled && lockStatus.mode === "password" && hasPassword;
+  lockPasswordArea.hidden = sel !== "password";
+  lockShortcutArea.hidden = sel !== "shortcut";
+  lockDisableArea.hidden = !(sel === "off" && lockStatus?.enabled);
+  // 已有密码时修改密码需验证旧密码；从密码模式切到快捷键也需验证当前密码
+  lockOldPasswordRow.hidden = !hasPassword;
+  lockOldPasswordRow2.hidden = !fromPassword;
+  lockPasswordSaveBtn.textContent = hasPassword ? "修改密码" : "设置密码";
+  // 关闭锁定：按当前模式验证密码或组合键
+  const shortcutMode = lockStatus?.mode === "shortcut";
+  lockDisablePasswordRow.hidden = !!shortcutMode;
+  lockDisableShortcutRow.hidden = !shortcutMode;
+  lockDisablePasswordEl.value = "";
+  lockDisableShortcutEl.value = "";
+  delete lockDisableShortcutEl.dataset.combo;
+}
+
+async function refreshLockUi() {
+  try {
+    lockStatus = await getLockStatus();
+  } catch {
+    return;
+  }
+  const mode = lockStatus.enabled ? lockStatus.mode : "off";
+  lockModeRadios().forEach((r) => (r.checked = r.value === mode));
+  lockAutoMinutesEl.value = String(lockStatus.auto_lock_minutes ?? 0);
+  if (lockStatus.shortcut) lockShortcutEl.value = formatHotkey(lockStatus.shortcut);
+  syncLockAreas();
+}
+
+lockModeRadios().forEach((r) => r.addEventListener("change", syncLockAreas));
+
+// 密码区：设置 / 修改密码
+lockPasswordSaveBtn.addEventListener("click", async () => {
+  const newPw = lockNewPasswordEl.value;
+  if (newPw.length < 4) {
+    alertDialog("密码至少 4 位");
+    return;
+  }
+  if (newPw !== lockNewPassword2El.value) {
+    alertDialog("两次输入的新密码不一致");
+    return;
+  }
+  const old = lockOldPasswordRow.hidden ? null : lockOldPasswordEl.value || null;
+  try {
+    await invoke("lock_set_password", { old, new: newPw });
+  } catch (e) {
+    alertDialog(`设置失败：${e}`);
+    return;
+  }
+  lockOldPasswordEl.value = "";
+  lockNewPasswordEl.value = "";
+  lockNewPassword2El.value = "";
+  await alertDialog("密码已设置，锁定功能已启用");
+  refreshLockUi();
+});
+
+// 快捷键区：录制组合键（至少两个修饰键 + 一个普通键）
+lockShortcutEl.addEventListener("keydown", (e) => {
+  e.preventDefault();
+  const combo = comboFromEvent(e);
+  if (!combo) return; // 只按了修饰键，继续等
+  const modCount = combo.split("+").length - 1;
+  if (modCount < 2) {
+    lockShortcutEl.value = "";
+    delete lockShortcutEl.dataset.combo;
+    alertDialog(
+      isMac
+        ? "请同时按住 ⌘ / ⌃ / ⌥ / ⇧ 中至少两个修饰键"
+        : "请同时按住 Ctrl / Shift / Alt / Win 中至少两个修饰键"
+    );
+    return;
+  }
+  lockShortcutEl.dataset.combo = combo;
+  lockShortcutEl.value = formatHotkey(combo);
+});
+
+$("#lock-shortcut-save").addEventListener("click", async () => {
+  const shortcut = lockShortcutEl.dataset.combo;
+  if (!shortcut) {
+    alertDialog("请先点击输入框，按下解锁组合键");
+    return;
+  }
+  const old = lockOldPasswordRow2.hidden ? null : lockOldPasswordScEl.value || null;
+  try {
+    await invoke("lock_set_shortcut", { old, shortcut });
+  } catch (e) {
+    alertDialog(`设置失败：${e}`);
+    return;
+  }
+  lockOldPasswordScEl.value = "";
+  await alertDialog("解锁快捷键已设置，锁定功能已启用");
+  refreshLockUi();
+});
+
+// 关闭锁定：验证当前密码 / 组合键
+lockDisableShortcutEl.addEventListener("keydown", (e) => {
+  e.preventDefault();
+  const combo = comboFromEvent(e);
+  if (!combo) return;
+  lockDisableShortcutEl.dataset.combo = combo;
+  lockDisableShortcutEl.value = formatHotkey(combo);
+});
+
+$("#lock-disable-confirm").addEventListener("click", async () => {
+  const credential =
+    lockStatus?.mode === "shortcut"
+      ? lockDisableShortcutEl.dataset.combo || ""
+      : lockDisablePasswordEl.value;
+  if (!credential) {
+    alertDialog(lockStatus?.mode === "shortcut" ? "请先按下当前解锁组合键" : "请输入当前密码");
+    return;
+  }
+  try {
+    await invoke("lock_disable", { credential });
+  } catch (e) {
+    alertDialog(`验证失败：${e}`);
+    return;
+  }
+  await alertDialog("锁定已关闭");
+  refreshLockUi();
+});
+
+// 自动锁定分钟数：保存即生效
+$("#lock-auto-save").addEventListener("click", async () => {
+  const minutes = Math.floor(Number(lockAutoMinutesEl.value) || 0);
+  if (minutes < 0 || minutes > 1440) {
+    alertDialog("自动锁定时间范围 0–1440 分钟（0 = 不自动锁定）");
+    return;
+  }
+  lockAutoMinutesEl.value = String(minutes);
+  try {
+    await invoke("lock_set_auto_lock", { minutes });
+  } catch (e) {
+    alertDialog(`保存失败：${e}`);
+    return;
+  }
+  const btn = $<HTMLButtonElement>("#lock-auto-save");
+  btn.textContent = "✓ 已保存";
+  window.setTimeout(() => (btn.textContent = "保存"), 1000);
+});
+
+// 手动立即锁定
+$("#lock-now").addEventListener("click", async () => {
+  if (!lockStatus?.enabled) {
+    alertDialog("尚未启用锁定：请先选择「密码锁定」或「快捷键锁定」并完成设置");
+    return;
+  }
+  await invoke("lock_now");
+});
+
 // ---------- 保存 ----------
 // 脏状态跟踪：以下字段都走「保存设置」一次提交，有改动才点亮按钮并提示
 const saveBtn = $<HTMLButtonElement>("#btn-save");
@@ -1755,6 +1941,12 @@ async function initBackground() {
   config = await loadConfig();
   applyAppearance(config);
   applyWindowEffect(config.window_effect);
+  // 锁定守卫：锁定时遮罩覆盖设置窗口
+  initLockGuard();
+  // 锁定设置被其他窗口（如锁定遮罩的「忘记密码」重置）改动时同步本页
+  listen("lock-state", () => {
+    if (!$<HTMLDivElement>("#tab-lock").hidden) refreshLockUi();
+  });
 
   // 默认数据目录按平台区分：Windows 便携模式 = 程序所在目录；
   // macOS 更新会整体替换 .app，默认在 Application Support

@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { applyAppearance, applyWindowEffect, AppConfig, loadConfig } from "./config";
+import { initLockGuard } from "./lock";
 
 const $ = <T extends HTMLElement>(sel: string) =>
   document.querySelector<T>(sel)!;
@@ -78,5 +79,6 @@ listen<AppConfig>("config-changed", (e) => {
   const cfg = await loadConfig();
   applyAppearance(cfg);
   applyWindowEffect(cfg.window_effect);
+  initLockGuard();
   refresh();
 })();

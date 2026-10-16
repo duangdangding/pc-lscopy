@@ -17,6 +17,7 @@
           <button class="tab active" data-tab="general">常规</button>
           <button class="tab" data-tab="appearance">外观</button>
           <button class="tab" data-tab="rules">记录规则</button>
+          <button class="tab" data-tab="lock">安全锁定</button>
           <button class="tab" data-tab="data">数据管理</button>
           <button class="tab" data-tab="sync">设备同步</button>
           <button class="tab" data-tab="about">关于</button>
@@ -224,9 +225,80 @@
         </section>
       </div>
 
-      <!-- 数据管理（数据库 + 删除管理） -->
-      <div class="tab-panel" id="tab-data" hidden>
+      <!-- 安全锁定 -->
+      <div class="tab-panel" id="tab-lock" hidden>
         <section class="card">
+          <h2>锁定方式</h2>
+          <div class="row" style="gap: 16px">
+            <label class="check"><input type="radio" name="lock-mode" value="off" checked /> 关闭</label>
+            <label class="check"><input type="radio" name="lock-mode" value="password" /> 密码锁定</label>
+            <label class="check"><input type="radio" name="lock-mode" value="shortcut" /> 快捷键锁定</label>
+          </div>
+          <p class="desc">锁定后所有窗口（面板 / 设置 / 黑名单 / 互传文件）被锁定界面覆盖，需解锁才能继续使用。本页所有设置即时生效，无需点击保存。</p>
+
+          <!-- 密码模式 -->
+          <div id="lock-password-area" hidden>
+            <div class="row" id="lock-old-password-row" hidden>
+              <input id="lock-old-password" type="password" placeholder="当前密码" autocomplete="off" />
+            </div>
+            <div class="row">
+              <input id="lock-new-password" type="password" placeholder="新密码（至少 4 位）" autocomplete="new-password" />
+              <input id="lock-new-password2" type="password" placeholder="确认新密码" autocomplete="new-password" />
+            </div>
+            <div class="row" style="margin-top: 8px">
+              <button id="lock-password-save" class="btn primary">设置密码</button>
+            </div>
+            <p class="desc">密码以加盐迭代哈希保存，不存明文。</p>
+          </div>
+
+          <!-- 快捷键模式 -->
+          <div id="lock-shortcut-area" hidden>
+            <div class="row" id="lock-old-password-row2" hidden>
+              <input id="lock-old-password-sc" type="password" placeholder="当前密码（从密码模式切换时验证）" autocomplete="off" />
+            </div>
+            <div class="row">
+              <input id="lock-shortcut" type="text" readonly placeholder="点击此处，然后按下组合键" />
+              <button id="lock-shortcut-save" class="btn primary">保存快捷键</button>
+            </div>
+            <p class="desc" id="lock-shortcut-desc">解锁组合键需同时按住至少两个修饰键（Ctrl / Shift / Alt / Win）加一个普通键，例如 Ctrl+Shift+K。</p>
+          </div>
+
+          <!-- 关闭锁定：需验证当前密码 / 组合键 -->
+          <div id="lock-disable-area" hidden>
+            <div class="row" id="lock-disable-password-row">
+              <input id="lock-disable-password" type="password" placeholder="输入当前密码以关闭锁定" autocomplete="off" />
+            </div>
+            <div class="row" id="lock-disable-shortcut-row" hidden>
+              <input id="lock-disable-shortcut" type="text" readonly placeholder="点击此处，按下当前解锁组合键" />
+            </div>
+            <div class="row" style="margin-top: 8px">
+              <button id="lock-disable-confirm" class="btn danger">验证并关闭锁定</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>自动锁定</h2>
+          <div class="row" style="align-items: center">
+            <span class="desc">解锁后</span>
+            <input id="lock-auto-minutes" type="number" min="0" max="1440" style="width: 80px" />
+            <span class="desc">分钟自动锁定（0 = 不自动锁定）</span>
+            <button id="lock-auto-save" class="btn small">保存</button>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>手动锁定</h2>
+          <div class="row">
+            <button id="lock-now" class="btn">立即锁定</button>
+            <span class="desc" style="align-self: center">也可使用托盘菜单「立即锁定」</span>
+          </div>
+          <p class="desc">忘记密码 / 快捷键时，可在锁定界面点「忘记密码 / 快捷键？」重置清空锁定设置（剪贴板记录不受影响）。</p>
+        </section>
+      </div>
+
+      <!-- 数据管理（数据库 + 删除管理） -->
+      <div class="tab-panel" id="tab-data" hidden>        <section class="card">
           <h2>数据库</h2>
           <div class="row">
             <input id="db-dir" type="text" placeholder="默认：程序所在目录" />

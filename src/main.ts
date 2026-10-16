@@ -4,6 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { applyAppearance, applyWindowEffect, applyWindowBackground, AppConfig, DEFAULT_HOTKEY, formatHotkey, isMac, loadConfig, watchTabsFade } from "./config";
 import { alertDialog, confirmDialog } from "./confirm";
+import { initLockGuard } from "./lock";
 import { icons } from "./icons";
 import { autoCheckEnabled, checkUpdate } from "./updater";
 
@@ -494,6 +495,11 @@ document.querySelector<HTMLButtonElement>("#update-banner-btn")!.onclick = async
   applyAppearance(config);
   applyWindowEffect(config.window_effect);
   applyBackground(config.background);
+  // 锁定守卫：锁定时面板被锁定遮罩覆盖，解锁后聚焦搜索框并刷新
+  initLockGuard(() => {
+    refresh(true);
+    searchEl.focus();
+  });
   panelPinned = await invoke<boolean>("get_panel_pinned");
   applyPinState();
   toggleEnabledEl.checked = config.enabled;

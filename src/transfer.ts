@@ -4,6 +4,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open } from "@tauri-apps/plugin-dialog";
 import { applyAppearance, applyWindowEffect, applyWindowBackground, AppConfig, loadConfig } from "./config";
 import { alertDialog, choiceDialog, confirmDialog } from "./confirm";
+import { initLockGuard } from "./lock";
 import { icons } from "./icons";
 
 const $ = <T extends HTMLElement>(sel: string) => document.querySelector<T>(sel)!;
@@ -533,6 +534,7 @@ listen<AppConfig>("config-changed", (e) => {
   applyAppearance(cfg);
   applyWindowEffect(cfg.window_effect);
   applyWindowBackground(cfg.background, cfg.background?.apply_transfer ?? false);
+  initLockGuard();
   refreshDevices();
   refreshHistory();
   sweepDevices(); // 打开窗口立即扫一轮
