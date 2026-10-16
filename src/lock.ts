@@ -85,8 +85,14 @@ async function forgotReset() {
     await invoke("lock_reset");
   } catch (e) {
     fail(`重置失败：${e}`);
+    return;
   }
-  // 后端会广播 lock-state，applyLocked 随事件更新
+  // 不等后端 lock-state 广播（可能丢失/竞态），先本地立即解锁并刷新状态
+  if (currentStatus) {
+    currentStatus.enabled = false;
+    currentStatus.locked = false;
+  }
+  applyLocked(false);
 }
 
 function buildOverlay() {
