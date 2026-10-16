@@ -52,6 +52,21 @@ fn new_salt() -> String {
     hex::encode(rand::random::<[u8; 16]>())
 }
 
+impl LockSettings {
+    /// 真正的有效启用状态：enabled 且当前模式有对应凭证。
+    /// 旧配置 / 异常写入可能让 enabled=true 但 hash、shortcut 都为空，
+    /// 这种"假启用"会让启动即锁定且永远无法解锁，一律按未启用处理。
+    pub(crate) fn effective(&self) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        match self.mode.as_str() {
+            "shortcut" => !self.shortcut.is_empty(),
+            _ => !self.password_hash.is_empty() && !self.salt.is_empty(),
+        }
+    }
+}
+
 /// 校验组合键格式：至少两个修饰键（Ctrl/Shift/Alt/Win/Cmd）+ 一个普通键
 fn valid_shortcut(s: &str) -> bool {
     let parts: Vec<&str> = s.split('+').map(|p| p.trim()).filter(|p| !p.is_empty()).collect();
@@ -106,7 +121,7 @@ fn emit_lock_state(app: &AppHandle) {
         "lock-state",
         LockStatePayload {
             locked: st.locked.load(Ordering::SeqCst),
-            enabled: s.enabled,
+            enabled: s.effective(),
             mode: s.mode.clone(),
         },
     );
@@ -115,7 +130,7 @@ fn emit_lock_state(app: &AppHandle) {
 /// 托盘「立即锁定」菜单项跟随启用状态（未启用锁定时置灰）
 fn update_tray_item(app: &AppHandle) {
     let st = app.state::<AppState>();
-    let enabled = st.lock.lock().unwrap().enabled;
+    let enabled = st.lock.lock().unwrap().effective();
     if let Some(item) = st.tray_lock.lock().unwrap().as_ref() {
         let _ = item.set_enabled(enabled);
     };
@@ -147,7 +162,7 @@ pub fn start(app: &AppHandle) {
         }
         let (enabled, mins) = {
             let s = st.lock.lock().unwrap();
-            (s.enabled, s.auto_lock_minutes)
+            (s.effective(), s.auto_lock_minutes)
         };
         if !enabled || mins == 0 {
             continue;
@@ -165,7 +180,7 @@ pub fn start(app: &AppHandle) {
 pub fn lock_get_status(state: State<AppState>) -> LockStatusDto {
     let s = state.lock.lock().unwrap();
     LockStatusDto {
-        enabled: s.enabled,
+        enabled: s.effective(),
         mode: s.mode.clone(),
         locked: state.locked.load(Ordering::SeqCst),
         auto_lock_minutes: s.auto_lock_minutes,
@@ -225,7 +240,7 @@ pub fn lock_set_shortcut(
     {
         let mut s = state.lock.lock().unwrap();
         // 从密码模式切走：要求验证当前密码（防止他人在未锁定时顺手改掉解锁方式）
-        if s.enabled && s.mode == "password" && !s.password_hash.is_empty() {
+        if s.effective() && s.mode == "password" && !s.password_hash.is_empty() {
             let old = old.ok_or("切换到快捷键解锁需要验证当前密码")?;
             if hash_password(&s.salt, &old) != s.password_hash {
                 return Err("当前密码不正确".into());
@@ -247,7 +262,7 @@ pub fn lock_set_shortcut(
 #[tauri::command]
 pub fn lock_unlock(app: AppHandle, state: State<AppState>, credential: String) -> bool {
     let s = state.lock.lock().unwrap();
-    if !s.enabled {
+    if !s.effective() {
         return true;
     }
     if !state.locked.load(Ordering::SeqCst) {
@@ -264,7 +279,7 @@ pub fn lock_unlock(app: AppHandle, state: State<AppState>, credential: String) -
 /// 手动立即锁定（未启用锁定时为空操作）
 #[tauri::command]
 pub fn lock_now(app: AppHandle, state: State<AppState>) {
-    if state.lock.lock().unwrap().enabled {
+    if state.lock.lock().unwrap().effective() {
         set_locked(&app, true);
     }
 }
@@ -292,7 +307,7 @@ pub fn lock_disable(
 ) -> Result<(), String> {
     {
         let s = state.lock.lock().unwrap();
-        if !s.enabled {
+        if !s.effective() {
             return Ok(());
         }
         if !verify_credential(&s, &credential) {

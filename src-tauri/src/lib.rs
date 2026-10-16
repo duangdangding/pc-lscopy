@@ -3454,7 +3454,12 @@ pub fn run() {
                 }
             }
             let raw = std::fs::read_to_string(&config_file).ok();
-            let (config, lan_settings, relay_settings, lock_settings) = load_config_full(raw.as_deref());
+            let (config, lan_settings, relay_settings, mut lock_settings) = load_config_full(raw.as_deref());
+            // 自愈：enabled=true 但没有任何凭证（旧配置/异常写入）会导致启动即锁定
+            // 且永远无法解锁，一律按未启用处理
+            if lock_settings.enabled && !lock_settings.effective() {
+                lock_settings = lock::LockSettings::default();
+            }
             let db_path = effective_db_path(&config);
             if !db_path.exists() {
                 let in_bundle_db = exe_dir().join("lscopy.db");
