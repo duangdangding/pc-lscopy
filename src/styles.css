@@ -4,6 +4,12 @@
   box-sizing: border-box;
 }
 
+/* hidden 属性必须能压过本文件里给元素设的 display（如 .lock-overlay / .row / .tab-panel），
+   否则 JS 里 el.hidden = true 会失效，元素照常显示 */
+[hidden] {
+  display: none !important;
+}
+
 /* Catppuccin Mocha 深色主题 */
 :root {
   --bg: #1e1e2e;
