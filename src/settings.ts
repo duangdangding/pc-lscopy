@@ -1580,6 +1580,9 @@ $("#btn-open-repo").addEventListener("click", () =>
 $("#btn-open-repo-android").addEventListener("click", () =>
   openUrl("https://github.com/duangdangding/android-copy")
 );
+$("#btn-open-star").addEventListener("click", () =>
+  openUrl("https://github.com/duangdangding/pc-lscopy")
+);
 
 async function initAboutTab() {
   curVersionEl.textContent = `v${await getVersion()}`;

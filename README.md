@@ -2,6 +2,16 @@
 
 一个 Windows 桌面共享剪贴板管理工具，基于 **Tauri 2 + Vanilla TypeScript + Rust**。
 
+> ## ⭐ 免费声明
+>
+> **本软件为个人开源软件，永久免费，源代码公开。**
+>
+> **如果你是花钱买到的，说明你被骗了 —— 请直接向卖家申请退款！**
+>
+> 唯一官方发布渠道：[GitHub Releases](https://github.com/duangdangding/pc-lscopy/releases)。
+>
+> 觉得好用的话，欢迎到 [GitHub 仓库](https://github.com/duangdangding/pc-lscopy) 点个 **Star ⭐** 支持一下作者！
+
 ## 功能特性
 
 ### 剪贴板历史
