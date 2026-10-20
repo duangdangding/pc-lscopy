@@ -99,7 +99,7 @@ pub struct AppConfig {
     pub remember_size: bool,     // 记住窗口大小（重启后恢复上次长宽）
     pub window_width: u32,       // 记住的窗口宽度（物理像素）
     pub window_height: u32,      // 记住的窗口高度（物理像素）
-    pub follow_cursor_monitor: bool, // 多显示器：唤起时面板跟随光标所在屏幕
+    pub follow_cursor_monitor: bool, // 多显示器：打开窗口时跟随光标所在屏幕
     pub window_effect: String,       // 主面板窗口材质："default" | "acrylic" | "vibrancy" | "mica"
     pub background: BackgroundConfig, // 面板背景图设置
     pub highlight_color: String,     // 搜索命中高亮颜色（#rrggbb）；空 = 跟随主题强调色
@@ -2917,28 +2917,19 @@ fn set_enabled(app: AppHandle, enabled: bool) {
 
 #[tauri::command]
 fn open_settings(app: AppHandle) {
-    if let Some(w) = app.get_webview_window("settings") {
-        let _ = w.show();
-        let _ = w.set_focus();
-    }
+    present_window(&app, "settings");
 }
 
 // 打开黑名单管理窗口
 #[tauri::command]
 fn open_blocked(app: AppHandle) {
-    if let Some(w) = app.get_webview_window("blocked") {
-        let _ = w.show();
-        let _ = w.set_focus();
-    }
+    present_window(&app, "blocked");
 }
 
 // 打开互传文件窗口
 #[tauri::command]
 fn open_transfer(app: AppHandle) {
-    if let Some(w) = app.get_webview_window("transfer") {
-        let _ = w.show();
-        let _ = w.set_focus();
-    }
+    present_window(&app, "transfer");
 }
 
 // 本地 UTC 偏移（秒），用于"今天"的零点计算
@@ -3124,6 +3115,7 @@ fn show_panel(app: AppHandle) {
                 let prev = capture_frontmost_app();
                 *app.state::<AppState>().prev_front_app.lock().unwrap() = prev;
             }
+            clamp_window_into_visible(&win);
             let _ = win.show();
         }
     }
@@ -3149,8 +3141,9 @@ fn toggle_window(app: &AppHandle) {
                 .unwrap()
                 .follow_cursor_monitor
             {
-                move_panel_to_cursor_monitor(&win);
+                move_window_to_cursor_monitor(&win);
             }
+            clamp_window_into_visible(&win);
             let _ = win.show();
             let _ = win.set_focus();
             let _ = app.emit("panel-shown", ());
@@ -3158,22 +3151,26 @@ fn toggle_window(app: &AppHandle) {
     }
 }
 
-/// 多显示器：唤起前把面板挪到光标所在屏幕。
-/// 面板中心已在该屏幕上则不挪动（尊重用户摆过的位置），否则居中到该屏幕。
-fn move_panel_to_cursor_monitor(win: &tauri::WebviewWindow) {
+/// 显示器（物理像素坐标）是否包含某点
+fn monitor_contains(m: &tauri::window::Monitor, x: f64, y: f64) -> bool {
+    let p = m.position();
+    let s = m.size();
+    x >= p.x as f64
+        && x < (p.x + s.width as i32) as f64
+        && y >= p.y as f64
+        && y < (p.y + s.height as i32) as f64
+}
+
+/// 多显示器：唤起前把窗口挪到光标所在屏幕。
+/// 窗口中心已在该屏幕上则不挪动（尊重用户摆过的位置），否则居中到该屏幕。
+fn move_window_to_cursor_monitor(win: &tauri::WebviewWindow) {
     let (Ok(cursor), Ok(monitors)) = (win.cursor_position(), win.available_monitors()) else {
         return;
     };
-    // 显示器与窗口坐标都是物理像素，同一坐标空间，可直接做包含判断
-    let contains = |m: &tauri::window::Monitor, x: f64, y: f64| {
-        let p = m.position();
-        let s = m.size();
-        x >= p.x as f64
-            && x < (p.x + s.width as i32) as f64
-            && y >= p.y as f64
-            && y < (p.y + s.height as i32) as f64
-    };
-    let Some(mon) = monitors.iter().find(|m| contains(m, cursor.x, cursor.y)) else {
+    let Some(mon) = monitors
+        .iter()
+        .find(|m| monitor_contains(m, cursor.x, cursor.y))
+    else {
         return;
     };
     let (Ok(wp), Ok(ws)) = (win.outer_position(), win.outer_size()) else {
@@ -3181,7 +3178,7 @@ fn move_panel_to_cursor_monitor(win: &tauri::WebviewWindow) {
     };
     let cx = wp.x as f64 + ws.width as f64 / 2.0;
     let cy = wp.y as f64 + ws.height as f64 / 2.0;
-    if contains(mon, cx, cy) {
+    if monitor_contains(mon, cx, cy) {
         return;
     }
     let mp = mon.position();
@@ -3191,6 +3188,53 @@ fn move_panel_to_cursor_monitor(win: &tauri::WebviewWindow) {
     let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
         nx, ny,
     )));
+}
+
+/// 多显示器：把窗口完整钳制回屏幕范围内。
+/// 以窗口中心所在显示器为准（不在任何屏上则回退主显示器）；
+/// 不同分辨率的屏幕之间移动后，任何一条边越界都拉回屏内，
+/// 窗口比屏幕还大时对齐屏幕左上原点（保证标题栏/拖动区域可及）。
+fn clamp_window_into_visible(win: &tauri::WebviewWindow) {
+    let (Ok(wp), Ok(ws)) = (win.outer_position(), win.outer_size()) else {
+        return;
+    };
+    let Ok(monitors) = win.available_monitors() else {
+        return;
+    };
+    let cx = wp.x as f64 + ws.width as f64 / 2.0;
+    let cy = wp.y as f64 + ws.height as f64 / 2.0;
+    let mon = match monitors.iter().find(|m| monitor_contains(m, cx, cy)) {
+        Some(m) => m.clone(),
+        None => match win.primary_monitor() {
+            Ok(Some(m)) => m,
+            _ => return,
+        },
+    };
+    let mp = mon.position();
+    let ms = mon.size();
+    // 窗口比屏幕宽/高时上限会小于下限，钳到屏幕原点
+    let max_x = (mp.x + ms.width as i32 - ws.width as i32).max(mp.x);
+    let max_y = (mp.y + ms.height as i32 - ws.height as i32).max(mp.y);
+    let nx = wp.x.clamp(mp.x, max_x);
+    let ny = wp.y.clamp(mp.y, max_y);
+    if nx != wp.x || ny != wp.y {
+        let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+            nx, ny,
+        )));
+    }
+}
+
+/// 统一展示窗口：开启「窗口跟随光标所在屏幕」时先挪到光标所在屏幕；
+/// 无论开关与否都钳制回屏内（多屏不同分辨率下不越界），再显示并聚焦。
+fn present_window(app: &AppHandle, label: &str) {
+    if let Some(w) = app.get_webview_window(label) {
+        if app.state::<AppState>().config.lock().unwrap().follow_cursor_monitor {
+            move_window_to_cursor_monitor(&w);
+        }
+        clamp_window_into_visible(&w);
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
 }
 
 // ---------- 便携版应用内更新 ----------
@@ -3395,10 +3439,7 @@ pub fn run() {
                 .message("共享剪贴板已经在运行中，可通过托盘图标或快捷键呼出。")
                 .title("提示")
                 .blocking_show();
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.show();
-                let _ = w.set_focus();
-            }
+            present_window(app, "main");
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -3526,18 +3567,8 @@ pub fn run() {
                         let current = app.state::<AppState>().config.lock().unwrap().enabled;
                         set_recording_enabled(app, !current);
                     }
-                    "settings" => {
-                        if let Some(w) = app.get_webview_window("settings") {
-                            let _ = w.show();
-                            let _ = w.set_focus();
-                        }
-                    }
-                    "transfer" => {
-                        if let Some(w) = app.get_webview_window("transfer") {
-                            let _ = w.show();
-                            let _ = w.set_focus();
-                        }
-                    }
+                    "settings" => present_window(app, "settings"),
+                    "transfer" => present_window(app, "transfer"),
                     "lock" => lock::set_locked(app, true),
                     "quit" => app.exit(0),
                     _ => {}

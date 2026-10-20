@@ -868,10 +868,7 @@ fn handle_pair(
 /// 配对确认：自动弹出设置窗口并切到「设备同步」页弹窗确认（最多 30 秒），无人应答返回 None
 fn ask_pair_approval(app: &AppHandle, requester: &LanDevice) -> Option<bool> {
     // 收到配对请求时自动弹出设置窗口，否则窗口关着时请求只会等到超时
-    if let Some(w) = app.get_webview_window("settings") {
-        let _ = w.show();
-        let _ = w.set_focus();
-    }
+    crate::present_window(app, "settings");
     // macOS 整个 App 可能被隐藏（NSApplication.hide），需要先唤回
     #[cfg(target_os = "macos")]
     let _ = app.show();

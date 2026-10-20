@@ -39,7 +39,7 @@ export interface AppConfig {
   remember_size: boolean; // 记住窗口大小
   window_width: number; // 记住的窗口宽度（物理像素）
   window_height: number; // 记住的窗口高度（物理像素）
-  follow_cursor_monitor: boolean; // 多显示器：唤起时面板跟随光标所在屏幕
+  follow_cursor_monitor: boolean; // 多显示器：打开窗口时跟随光标所在屏幕
   window_effect: string; // 主面板窗口材质："default" | "acrylic" | "vibrancy" | "mica"
   background: BackgroundConfig; // 面板背景图设置
   highlight_color: string; // 搜索命中高亮颜色（#rrggbb）；空 = 跟随主题强调色

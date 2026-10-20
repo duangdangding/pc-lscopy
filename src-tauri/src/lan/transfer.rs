@@ -158,10 +158,7 @@ fn recv_dir(app: &AppHandle) -> Option<PathBuf> {
 /// 接收确认：互传窗口弹窗等待用户答复（最多 CONFIRM_TIMEOUT_SECS 秒），无人应答返回 None
 fn ask_recv_approval(app: &AppHandle, peer: &str, name: &str, size: u64, host: &str) -> Option<bool> {
     // 收到文件请求时自动弹出互传窗口，否则窗口关着时请求只会等到超时
-    if let Some(w) = app.get_webview_window("transfer") {
-        let _ = w.show();
-        let _ = w.set_focus();
-    }
+    crate::present_window(app, "transfer");
     // macOS 整个 App 可能被隐藏（NSApplication.hide），需要先唤回
     #[cfg(target_os = "macos")]
     let _ = app.show();
