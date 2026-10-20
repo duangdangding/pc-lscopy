@@ -3289,51 +3289,158 @@ fn portable_update_begin(target_dir: Option<String>) -> Result<String, String> {
     Ok(path.to_string_lossy().to_string())
 }
 
-/// 流式下载更新包到指定路径，进度通过 portable-update-progress 事件回传
+/// 解析可用的 HTTP 代理（返回 host:port）：GitHub 直连在国内常超时（os error 10060），
+/// 而浏览器走系统代理通常可用——ureq 默认不读系统代理，这里显式探测：
+/// 优先环境变量（HTTPS_PROXY / ALL_PROXY / HTTP_PROXY），Windows 再读系统代理注册表。
+fn detect_http_proxy() -> Option<String> {
+    for key in [
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+    ] {
+        if let Ok(v) = std::env::var(key) {
+            let v = v
+                .trim()
+                .trim_start_matches("http://")
+                .trim_start_matches("https://")
+                .trim_end_matches('/');
+            if !v.is_empty() {
+                return Some(v.to_string());
+            }
+        }
+    }
+    #[cfg(target_family = "windows")]
+    {
+        use winreg::enums::*;
+        use winreg::RegKey;
+        let key = RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings")
+            .ok()?;
+        let enabled: u32 = key.get_value("ProxyEnable").unwrap_or(0);
+        if enabled == 0 {
+            return None;
+        }
+        let server: String = key.get_value("ProxyServer").ok()?;
+        // ProxyServer 可能是 "host:port"，也可能是分协议的 "http=…;https=…;ftp=…"
+        let mut plain: Option<String> = None;
+        let mut any: Option<String> = None;
+        for part in server.split(';') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            match part.split_once('=') {
+                Some((scheme, addr)) => {
+                    let addr = addr.trim();
+                    if scheme.trim().eq_ignore_ascii_case("https") {
+                        return Some(addr.to_string());
+                    }
+                    if any.is_none() && !addr.is_empty() {
+                        any = Some(addr.to_string());
+                    }
+                }
+                None => plain = Some(part.to_string()),
+            }
+        }
+        plain.or(any)
+    }
+    #[cfg(not(target_family = "windows"))]
+    None
+}
+
+/// 更新下载专用 HTTP 客户端：显式超时（避免操作系统级长时间无响应）+ 环境/系统代理
+fn http_agent() -> ureq::Agent {
+    let mut builder = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(15))
+        .timeout_read(Duration::from_secs(60))
+        .timeout_write(Duration::from_secs(60));
+    if let Some(p) = detect_http_proxy() {
+        if let Ok(proxy) = ureq::Proxy::new(format!("http://{p}")) {
+            builder = builder.proxy(proxy);
+        }
+    }
+    builder.build()
+}
+
+/// 流式下载更新包到指定路径，进度通过 portable-update-progress 事件回传。
+/// GitHub 直连可能超时（os error 10060）：失败自动重试 3 次（间隔 2s / 5s），
+/// 每次从头下载（文件截断重建），代理由 http_agent 探测。
 #[tauri::command]
 async fn portable_update_download(app: AppHandle, url: String, path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        use std::io::Read;
-        let resp = ureq::get(&url)
-            .call()
-            .map_err(|e| format!("下载失败: {e}"))?;
-        let total: u64 = resp
-            .header("content-length")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
-        let mut reader = resp.into_reader();
-        let mut file = std::fs::File::create(&path)
-            .map_err(|e| format!("无法创建文件 {path}: {e}"))?;
-        let mut buf = [0u8; 65536];
-        let mut sent: u64 = 0;
-        loop {
-            let n = reader.read(&mut buf).map_err(|e| e.to_string())?;
-            if n == 0 {
-                break;
+        use std::io::{Read, Write};
+        let mut last_err = String::new();
+        for attempt in 1..=3u32 {
+            if attempt > 1 {
+                std::thread::sleep(Duration::from_secs(if attempt == 2 { 2 } else { 5 }));
+                // 重试时进度归零，前端进度条重新起步
+                let _ = app.emit(
+                    "portable-update-progress",
+                    serde_json::json!({ "sent": 0u64, "total": 0u64 }),
+                );
             }
-            use std::io::Write;
-            file.write_all(&buf[..n]).map_err(|e| e.to_string())?;
-            sent += n as u64;
-            let _ = app.emit(
-                "portable-update-progress",
-                serde_json::json!({ "sent": sent, "total": total }),
-            );
+            let result = (|| -> Result<(), String> {
+                let resp = http_agent()
+                    .get(&url)
+                    .call()
+                    .map_err(|e| format!("连接失败: {e}"))?;
+                let total: u64 = resp
+                    .header("content-length")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+                let mut reader = resp.into_reader();
+                let mut file = std::fs::File::create(&path)
+                    .map_err(|e| format!("无法创建文件 {path}: {e}"))?;
+                let mut buf = [0u8; 65536];
+                let mut sent: u64 = 0;
+                loop {
+                    let n = reader.read(&mut buf).map_err(|e| e.to_string())?;
+                    if n == 0 {
+                        break;
+                    }
+                    file.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+                    sent += n as u64;
+                    let _ = app.emit(
+                        "portable-update-progress",
+                        serde_json::json!({ "sent": sent, "total": total }),
+                    );
+                }
+                Ok(())
+            })();
+            match result {
+                Ok(()) => return Ok(()),
+                Err(e) => last_err = format!("{e}（第 {attempt}/3 次）"),
+            }
         }
-        Ok(())
+        Err(format!("下载失败（已重试 3 次）：{last_err}"))
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
-/// 拉取文本资源（用于读取 Release 的 sha256sums 校验文件）
+/// 拉取文本资源（用于读取 Release 的 sha256sums 校验文件），与下载同一套代理/超时/重试
 #[tauri::command]
 async fn http_get_text(url: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        ureq::get(&url)
-            .call()
-            .map_err(|e| format!("请求失败: {e}"))?
-            .into_string()
-            .map_err(|e| e.to_string())
+        let mut last_err = String::new();
+        for attempt in 1..=3u32 {
+            if attempt > 1 {
+                std::thread::sleep(Duration::from_secs(2));
+            }
+            match http_agent()
+                .get(&url)
+                .call()
+                .map_err(|e| format!("请求失败: {e}"))
+                .and_then(|r| r.into_string().map_err(|e| e.to_string()))
+            {
+                Ok(text) => return Ok(text),
+                Err(e) => last_err = format!("{e}（第 {attempt}/3 次）"),
+            }
+        }
+        Err(last_err)
     })
     .await
     .map_err(|e| e.to_string())?
