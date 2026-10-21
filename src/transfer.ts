@@ -56,6 +56,7 @@ interface TransferIncoming {
   name: string;
   size: number;
   host: string;
+  device_key: string;
 }
 
 // ---------- 状态 ----------
@@ -387,6 +388,11 @@ function renderPendingRecvs() {
     const cd = document.createElement("span");
     cd.className = "tf-pending-cd";
     cd.textContent = `${Math.max(0, Math.ceil((p.deadline - now) / 1000))}s`;
+    const batchBtn = document.createElement("button");
+    batchBtn.className = "btn small";
+    batchBtn.textContent = "本批都接收";
+    batchBtn.title = "接收此文件，并自动接收该设备 10 分钟内的后续文件（每收一个重新计时）";
+    batchBtn.onclick = () => respondRecv(p.request_id, true, true);
     const acceptBtn = document.createElement("button");
     acceptBtn.className = "btn small primary";
     acceptBtn.textContent = "接收";
@@ -395,17 +401,17 @@ function renderPendingRecvs() {
     rejectBtn.className = "btn small danger";
     rejectBtn.textContent = "拒绝";
     rejectBtn.onclick = () => respondRecv(p.request_id, false);
-    actions.append(cd, acceptBtn, rejectBtn);
+    actions.append(cd, batchBtn, acceptBtn, rejectBtn);
 
     row.append(arrow, meta, actions);
     listEl.appendChild(row);
   }
 }
 
-function respondRecv(requestId: string, accept: boolean) {
+function respondRecv(requestId: string, accept: boolean, remember = false) {
   pendingRecvs.delete(requestId);
   renderPendingRecvs();
-  invoke("transfer_respond_recv", { requestId, accept }).catch(() => {});
+  invoke("transfer_respond_recv", { requestId, accept, remember }).catch(() => {});
 }
 
 // 每秒刷新倒计时并移除已超时的行（后端同时已自动拒绝，无需再答复）

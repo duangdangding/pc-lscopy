@@ -130,7 +130,9 @@ cargo clippy           # lint
   - 接收确认：`lan.transfer_auto_accept`（默认 false）关闭时在「待接收」卡片列出等用户答复
     （`pending_recvs` 通道 + `transfer-incoming` 事件，60s 超时自动拒绝；前端 `pendingRecvs`
     列表支持逐个/全部接收/拒绝，每秒刷新倒计时并同步移除超时行），答复命令
-    `transfer_respond_recv`；收到请求时自动弹出 transfer 窗口（mac 还要 `app.show()`）。
+    `transfer_respond_recv`（`remember=true` 即「本批都接收」：该 deviceId/IP 写入
+    `transfer_trusted`，10 分钟滑动期内后续文件免确认直收，每收一个重新计时）；
+    收到请求时自动弹出 transfer 窗口（mac 还要 `app.show()`）。
     拒绝/超时后排空请求体（上限 64MB）再断连，让发送方读到明确错误而非写失败。
   - 发送：在线设备直接选（`transfer_send`）或手动 IP（`transfer_send_ip`，探测配置端口 +
     8765 的 `/info`）；已配对设备用对方配对码做 XOR 流加密（X-Enc-Nonce 头），未配对明文；

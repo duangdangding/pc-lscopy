@@ -172,8 +172,10 @@ pub struct LanShared {
     pub discovered: Mutex<HashMap<String, Discovered>>,
     /// 等待用户确认的配对请求：deviceId → 答复通道
     pub pending_pairs: Mutex<HashMap<String, mpsc::Sender<bool>>>,
-    /// 等待用户确认的文件接收请求：requestId → 答复通道
-    pub pending_recvs: Mutex<HashMap<String, mpsc::Sender<bool>>>,
+    /// 等待用户确认的文件接收请求：requestId →（设备标识，答复通道）
+    pub pending_recvs: Mutex<HashMap<String, (String, mpsc::Sender<bool>)>>,
+    /// 「本批都接收」临时免确认：设备标识（deviceId，无则 IP）→ 最近一次接收时刻（10 分钟滑动有效）
+    pub transfer_trusted: Mutex<HashMap<String, Instant>>,
     pub server_running: AtomicBool,
     /// 实际监听端口（配置端口被占用时由系统分配）
     pub actual_port: AtomicU64,
@@ -194,6 +196,7 @@ impl LanShared {
             discovered: Mutex::new(HashMap::new()),
             pending_pairs: Mutex::new(HashMap::new()),
             pending_recvs: Mutex::new(HashMap::new()),
+            transfer_trusted: Mutex::new(HashMap::new()),
             server_running: AtomicBool::new(false),
             actual_port: AtomicU64::new(0),
             syncing: Mutex::new(HashSet::new()),

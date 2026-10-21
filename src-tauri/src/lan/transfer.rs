@@ -27,6 +27,8 @@ const HISTORY_KEEP: i64 = 200;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 /// 接收确认等待超时（秒）
 const CONFIRM_TIMEOUT_SECS: u64 = 60;
+/// 「本批都接收」临时免确认时长（秒，滑动续期：每自动接收一个文件重新计时）
+const TRUST_BATCH_SECS: u64 = 600;
 /// 拒绝接收时排空请求体的上限（防止对端虚报超大 Content-Length 导致一直读）
 const DRAIN_CAP: u64 = 64 * 1024 * 1024;
 
@@ -155,8 +157,15 @@ fn recv_dir(app: &AppHandle) -> Option<PathBuf> {
 
 // ---------- 接收端：POST /recv ----------
 
-/// 接收确认：互传窗口弹窗等待用户答复（最多 CONFIRM_TIMEOUT_SECS 秒），无人应答返回 None
-fn ask_recv_approval(app: &AppHandle, peer: &str, name: &str, size: u64, host: &str) -> Option<bool> {
+/// 接收确认：互传窗口「待接收」列表等待用户答复（最多 CONFIRM_TIMEOUT_SECS 秒），无人应答返回 None
+fn ask_recv_approval(
+    app: &AppHandle,
+    peer: &str,
+    name: &str,
+    size: u64,
+    host: &str,
+    dev_key: &str,
+) -> Option<bool> {
     // 收到文件请求时自动弹出互传窗口，否则窗口关着时请求只会等到超时
     crate::present_window(app, "transfer");
     // macOS 整个 App 可能被隐藏（NSApplication.hide），需要先唤回
@@ -169,7 +178,7 @@ fn ask_recv_approval(app: &AppHandle, peer: &str, name: &str, size: u64, host: &
         .pending_recvs
         .lock()
         .unwrap()
-        .insert(req_id.clone(), tx);
+        .insert(req_id.clone(), (dev_key.to_string(), tx));
     let _ = app.emit(
         "transfer-incoming",
         json!({
@@ -178,6 +187,7 @@ fn ask_recv_approval(app: &AppHandle, peer: &str, name: &str, size: u64, host: &
             "name": name,
             "size": size,
             "host": host,
+            "device_key": dev_key,
         }),
     );
     let r = rx
@@ -258,9 +268,31 @@ pub fn handle_recv(
             .unwrap_or_else(|| client_ip.to_string())
     };
 
-    // 默认手动确认：弹窗等待用户答复（开启「自动接收」则跳过）
-    if !auto_accept {
-        let (accepted, err_code) = match ask_recv_approval(app, &peer, &name, total, client_ip) {
+    // 「本批都接收」临时免确认：同一设备 10 分钟内的后续文件直接收（每收一个重新计时）
+    let dev_key = headers
+        .get("x-device-id")
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .unwrap_or_else(|| client_ip.to_string());
+    let batch_trusted = {
+        let state = app.state::<AppState>();
+        let mut m = state.lan.transfer_trusted.lock().unwrap();
+        match m.get_mut(&dev_key) {
+            Some(t) if t.elapsed() < Duration::from_secs(TRUST_BATCH_SECS) => {
+                *t = Instant::now();
+                true
+            }
+            _ => {
+                m.remove(&dev_key);
+                false
+            }
+        }
+    };
+
+    // 默认手动确认：待接收列表等待用户答复（开启「自动接收」或「本批都接收」临时免确认则跳过）
+    if !auto_accept && !batch_trusted {
+        let (accepted, err_code) =
+            match ask_recv_approval(app, &peer, &name, total, client_ip, &dev_key) {
             Some(true) => (true, 0),
             Some(false) => (false, 403),
             None => (false, 409),
@@ -777,16 +809,29 @@ pub fn transfer_cancel(state: State<AppState>) {
     }
 }
 
-/// 接收确认弹窗的答复
+/// 待接收列表的答复；remember=true（「本批都接收」）时临时免确认同一设备的后续文件
 #[tauri::command]
-pub fn transfer_respond_recv(state: State<AppState>, request_id: String, accept: bool) {
-    if let Some(tx) = state
+pub fn transfer_respond_recv(
+    state: State<AppState>,
+    request_id: String,
+    accept: bool,
+    remember: Option<bool>,
+) {
+    if let Some((key, tx)) = state
         .lan
         .pending_recvs
         .lock()
         .unwrap()
         .remove(&request_id)
     {
+        if accept && remember.unwrap_or(false) {
+            state
+                .lan
+                .transfer_trusted
+                .lock()
+                .unwrap()
+                .insert(key, Instant::now());
+        }
         let _ = tx.send(accept);
     }
 }
