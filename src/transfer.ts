@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open } from "@tauri-apps/plugin-dialog";
-import { applyAppearance, applyWindowEffect, applyWindowBackground, AppConfig, loadConfig } from "./config";
+import { applyAppearance, applyWindowEffect, applyWindowBackground, AppConfig, initEscClose, loadConfig } from "./config";
 import { alertDialog, choiceDialog, confirmDialog } from "./confirm";
 import { initLockGuard } from "./lock";
 import { icons } from "./icons";
@@ -535,6 +535,7 @@ listen<AppConfig>("config-changed", (e) => {
   applyWindowEffect(cfg.window_effect);
   applyWindowBackground(cfg.background, cfg.background?.apply_transfer ?? false);
   initLockGuard();
+  initEscClose(); // ESC 关闭窗口
   refreshDevices();
   refreshHistory();
   sweepDevices(); // 打开窗口立即扫一轮

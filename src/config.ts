@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 /** 背景图选区：归一化坐标（0-1），相对于旋转后的源图 */
 export interface BgRegion {
@@ -61,6 +62,29 @@ export async function loadConfig(): Promise<AppConfig> {
     }
   }
   throw lastErr;
+}
+
+/**
+ * ESC 关闭窗口（设置 / 黑名单 / 互传文件窗口共用；主面板在 main.ts 有自己的
+ * ESC 逻辑：先清搜索词、再按才关）。走 close() → 后端 CloseRequested 统一改隐藏，
+ * 再次打开更快。
+ * 守卫：锁定遮罩显示中、确认弹窗打开（其 ESC = 取消弹窗，capture 阶段已拦截，
+ * 这里兜底）、字体下拉展开中，都不关窗口；热键 / 解锁组合键录制框的 keydown 一律
+ * preventDefault（ESC 属于录入内容），靠 defaultPrevented 自然跳过。
+ */
+export function initEscClose() {
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || e.defaultPrevented) return;
+    // 锁定中：不触发任何窗口快捷键
+    const lock = document.querySelector<HTMLElement>(".lock-overlay");
+    if (lock && !lock.hidden) return;
+    // 确认弹窗打开时 ESC 是「取消弹窗」
+    if (document.querySelector(".confirm-overlay")) return;
+    // 字体下拉展开时先收下拉（搜索框的 ESC 已 stopPropagation，这里兜底焦点在别处的场景）
+    const fd = document.querySelector<HTMLElement>("#font-dropdown");
+    if (fd && fd.style.display === "block") return;
+    getCurrentWindow().close();
+  });
 }
 
 /**

@@ -143,6 +143,11 @@ cargo clippy           # lint
   - 密钥流 8 字节块全局对齐（`xor_crypt_at` 带 chunk_base），收发两端块大小都必须是 8 的倍数。
 - **批量删除三选一**：范围内有置顶记录时用 `choiceDialog` 提供「取消 / 只删非置顶 / 连同置顶删除」，
   不要退回二选一弹窗（取消语义会被占用）。
+- **ESC 关闭窗口**：主面板在 `main.ts` 有自己的逻辑（有搜索词先清搜索，再按才 `hide_panel`）；
+  设置 / 黑名单 / 互传文件走 `config.ts` 的 `initEscClose()`（`close()` → 后端 CloseRequested
+  统一改隐藏），守卫：锁定遮罩显示中、`.confirm-overlay` 打开、字体下拉展开、
+  `e.defaultPrevented`（热键 / 解锁组合键录制框的 keydown 一律 preventDefault，ESC 属于录入内容）。
+  新增窗口记得挂 `initEscClose()`；新增需要占用 ESC 的组件用 capture + `stopPropagation`（确认弹窗模式）或 `preventDefault`。
 - **构建必须走 Tauri CLI**（`bun run tauri build` / `tauri dev`），不要裸 `cargo build --release`：CLI 会开启 `custom-protocol` 特性并正确处理前端资源协议，裸 cargo 构建的 exe 会显示"无法访问页面"。
 - Windows 为主要目标平台；`winreg` 仅 Windows 编译（`cfg(windows)`）。
 - 剪贴板图片读取有 Windows 原生兜底逻辑（CF_BITMAP/CF_DIB），改动相关代码时注意不要回归截图软件兼容性。

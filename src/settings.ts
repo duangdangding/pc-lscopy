@@ -4,7 +4,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { applyAppearance, applyWindowEffect, applyWindowBackground, AppConfig, BackgroundConfig, DEFAULT_HOTKEY, defaultBackground, formatHotkey, isMac, loadConfig, styleBgLayer, watchTabsFade } from "./config";
+import { applyAppearance, applyWindowEffect, applyWindowBackground, AppConfig, BackgroundConfig, DEFAULT_HOTKEY, defaultBackground, formatHotkey, initEscClose, isMac, loadConfig, styleBgLayer, watchTabsFade } from "./config";
 import { alertDialog, confirmDialog, choiceDialog } from "./confirm";
 import { initLockGuard, getLockStatus, comboFromEvent, LockStatus } from "./lock";
 import { autoCheckEnabled, checkUpdate, resetUpdateCache, setAutoCheckEnabled, UpdateInfo } from "./updater";
@@ -1298,6 +1298,8 @@ function initFontPicker(fonts: string[]) {
   fontSearchEl.addEventListener("input", () => renderFontList(fontSearchEl.value));
   fontSearchEl.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
+      // 先收下拉，不关窗口（initEscClose 在 document 冒泡阶段，这里拦下）
+      e.stopPropagation();
       closeFontDropdown();
     } else if (e.key === "Enter") {
       e.preventDefault();
@@ -1948,6 +1950,8 @@ async function initBackground() {
   applyWindowEffect(config.window_effect);
   // 锁定守卫：锁定时遮罩覆盖设置窗口
   initLockGuard();
+  // ESC 关闭设置窗口（确认弹窗 / 锁定遮罩 / 热键录制 / 字体下拉打开时不关）
+  initEscClose();
   // 锁定设置被其他窗口（如锁定遮罩的「忘记密码」重置）改动时同步本页
   listen("lock-state", () => {
     if (!$<HTMLDivElement>("#tab-lock").hidden) refreshLockUi();

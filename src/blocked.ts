@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { applyAppearance, applyWindowEffect, AppConfig, loadConfig } from "./config";
+import { applyAppearance, applyWindowEffect, AppConfig, initEscClose, loadConfig } from "./config";
 import { initLockGuard } from "./lock";
 
 const $ = <T extends HTMLElement>(sel: string) =>
@@ -80,5 +80,6 @@ listen<AppConfig>("config-changed", (e) => {
   applyAppearance(cfg);
   applyWindowEffect(cfg.window_effect);
   initLockGuard();
+  initEscClose(); // ESC 关闭窗口
   refresh();
 })();
