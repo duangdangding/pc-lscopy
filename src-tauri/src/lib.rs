@@ -97,8 +97,8 @@ pub struct AppConfig {
     pub retention_unit: String,  // "hours" | "days" | "months" | "years"
     pub enabled: bool,           // 是否开启剪贴板记录
     pub remember_size: bool,     // 记住窗口大小（重启后恢复上次长宽）
-    pub window_width: u32,       // 记住的窗口宽度（物理像素）
-    pub window_height: u32,      // 记住的窗口高度（物理像素）
+    pub window_width: u32,       // 记住的窗口宽度（逻辑像素，DPI 无关）
+    pub window_height: u32,      // 记住的窗口高度（逻辑像素，DPI 无关）
     pub follow_cursor_monitor: bool, // 多显示器：打开窗口时跟随光标所在屏幕
     // 设置窗口已打开且被其他窗口遮挡（可见但未聚焦）时按快捷键的行为：
     // "front" = 把设置窗口显示到最前面并聚焦；"close" = 关闭（隐藏）设置窗口
@@ -2430,12 +2430,14 @@ fn save_config(
     config_dir_action: String,
 ) -> Result<(), String> {
     // 0. 开启「记住窗口大小」时，立即把当前面板实际尺寸写入配置
+    // （inner_size 是物理像素，换算成逻辑像素保存，与 Resized 落盘口径一致）
     let mut config = config;
     if config.remember_size {
         if let Some(win) = app.get_webview_window("main") {
             if let Ok(size) = win.inner_size() {
-                config.window_width = size.width;
-                config.window_height = size.height;
+                let scale = win.scale_factor().unwrap_or(1.0).max(0.5);
+                config.window_width = (size.width as f64 / scale).round() as u32;
+                config.window_height = (size.height as f64 / scale).round() as u32;
             }
         }
     }
@@ -3731,12 +3733,23 @@ pub fn run() {
 
             // 主窗口：关闭改隐藏；失焦自动关闭（点其他位置即关闭）
             if let Some(win) = app.get_webview_window("main") {
-                // 记住窗口大小：启动时恢复上次尺寸（物理像素，避免 DPI 换算漂移）
+                // 记住窗口大小：启动时恢复上次尺寸。
+                // 一律按逻辑像素（DPI 无关）保存/恢复：物理像素在缩放比不同的多显示器
+                // 之间不稳定——窗口跨屏移动时系统按新 DPI 重算物理尺寸，存物理值会导致
+                // 换屏 / 重启后视觉大小漂移（实测：150% 副屏调的 1052x1439 物理 = 701x959
+                // 逻辑，落到 100% 主屏按物理恢复会变成逻辑 1052x1439，视觉大 1.5 倍）。
                 if config.remember_size && config.window_width > 0 && config.window_height > 0 {
-                    let _ = win.set_size(tauri::PhysicalSize::new(
-                        config.window_width,
-                        config.window_height,
-                    ));
+                    let (mut w, mut h) = (config.window_width, config.window_height);
+                    // 钳制到当前显示器逻辑尺寸内：旧配置存的是物理像素、或窗口从大屏
+                    // 换到小屏时，避免恢复出比屏幕还大的窗口（用户重调一次即长期稳定）
+                    if let Ok(Some(mon)) = win.current_monitor() {
+                        let scale = mon.scale_factor();
+                        let mw = (mon.size().width as f64 / scale) as u32;
+                        let mh = (mon.size().height as f64 / scale) as u32;
+                        w = w.min(mw);
+                        h = h.min(mh);
+                    }
+                    let _ = win.set_size(tauri::LogicalSize::new(w as f64, h as f64));
                 }
                 // 启动时应用配置的窗口材质效果（默认不透明则无操作）
                 apply_window_effect_all(app.handle(), &config.window_effect, config.theme != "light");
@@ -3747,10 +3760,15 @@ pub fn run() {
                         hide_panel_and_yield_focus(w.app_handle());
                     }
                     WindowEvent::Resized(size) => {
-                        // 记住窗口大小开启时：暂存新尺寸，由监听线程统一落盘
+                        // 记住窗口大小开启时：暂存新尺寸，由监听线程统一落盘。
+                        // Resized 给的是物理像素，换算成逻辑像素再存——跨 DPI 移动窗口时
+                        // 系统会重算物理尺寸（保持逻辑尺寸），存逻辑值则保存结果始终稳定
                         let state = w.state::<AppState>();
                         if state.config.lock().unwrap().remember_size {
-                            *state.pending_size.lock().unwrap() = Some((size.width, size.height));
+                            let scale = w.scale_factor().unwrap_or(1.0).max(0.5);
+                            let lw = (size.width as f64 / scale).round() as u32;
+                            let lh = (size.height as f64 / scale).round() as u32;
+                            *state.pending_size.lock().unwrap() = Some((lw, lh));
                         }
                     }
                     WindowEvent::Focused(focused) => {

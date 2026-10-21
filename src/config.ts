@@ -37,8 +37,8 @@ export interface AppConfig {
   retention_unit: string; // "hours" | "days" | "months" | "years"
   enabled: boolean; // 是否开启剪贴板记录
   remember_size: boolean; // 记住窗口大小
-  window_width: number; // 记住的窗口宽度（物理像素）
-  window_height: number; // 记住的窗口高度（物理像素）
+  window_width: number; // 记住的窗口宽度（逻辑像素，DPI 无关）
+  window_height: number; // 记住的窗口高度（逻辑像素，DPI 无关）
   follow_cursor_monitor: boolean; // 多显示器：打开窗口时跟随光标所在屏幕
   // 设置页已打开但被其他窗口遮挡（可见未聚焦）时按快捷键的行为："front" 显示到最前面 | "close" 关闭设置窗口
   settings_hotkey_action: string;
