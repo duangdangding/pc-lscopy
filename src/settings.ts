@@ -18,6 +18,7 @@ const autostartEl = $<HTMLInputElement>("#autostart");
 const silentStartEl = $<HTMLInputElement>("#silent-start");
 const rememberSizeEl = $<HTMLInputElement>("#remember-size");
 const followCursorMonitorEl = $<HTMLInputElement>("#follow-cursor-monitor");
+const settingsHotkeyActionEl = $<HTMLSelectElement>("#settings-hotkey-action");
 const dbDirEl = $<HTMLInputElement>("#db-dir");
 const themeEl = $<HTMLSelectElement>("#theme");
 const windowEffectEl = $<HTMLSelectElement>("#window-effect");
@@ -1148,7 +1149,7 @@ function markDirty() {
 
 [
   hotkeyEl, enabledEl, autostartEl, silentStartEl, rememberSizeEl,
-  followCursorMonitorEl, dbDirEl, configDirEl, themeEl, fontFamilyEl,
+  followCursorMonitorEl, settingsHotkeyActionEl, dbDirEl, configDirEl, themeEl, fontFamilyEl,
   fontSizeEl, maxItemsEl, retentionValueEl, retentionUnitEl, excludeAppsEl,
   highlightColorEl, highlightFollowEl,
 ].forEach((el) => {
@@ -1222,6 +1223,7 @@ $("#btn-save").addEventListener("click", async () => {
     window_width: config.window_width,
     window_height: config.window_height,
     follow_cursor_monitor: followCursorMonitorEl.checked,
+    settings_hotkey_action: settingsHotkeyActionEl.value === "close" ? "close" : "front",
   };
   try {
     await invoke("save_config", { config: next, configDirAction });
@@ -1964,6 +1966,7 @@ async function initBackground() {
   silentStartEl.checked = config.silent_start;
   rememberSizeEl.checked = config.remember_size ?? false;
   followCursorMonitorEl.checked = config.follow_cursor_monitor ?? true;
+  settingsHotkeyActionEl.value = config.settings_hotkey_action === "close" ? "close" : "front";
   dbDirEl.value = config.db_dir || "";
   configDirEl.value = config.config_dir || "";
   themeEl.value = config.theme;

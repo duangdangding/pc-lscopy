@@ -40,6 +40,8 @@ export interface AppConfig {
   window_width: number; // 记住的窗口宽度（物理像素）
   window_height: number; // 记住的窗口高度（物理像素）
   follow_cursor_monitor: boolean; // 多显示器：打开窗口时跟随光标所在屏幕
+  // 设置页已打开但被其他窗口遮挡（可见未聚焦）时按快捷键的行为："front" 显示到最前面 | "close" 关闭设置窗口
+  settings_hotkey_action: string;
   window_effect: string; // 主面板窗口材质："default" | "acrylic" | "vibrancy" | "mica"
   background: BackgroundConfig; // 面板背景图设置
   highlight_color: string; // 搜索命中高亮颜色（#rrggbb）；空 = 跟随主题强调色

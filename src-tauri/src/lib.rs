@@ -100,6 +100,9 @@ pub struct AppConfig {
     pub window_width: u32,       // 记住的窗口宽度（物理像素）
     pub window_height: u32,      // 记住的窗口高度（物理像素）
     pub follow_cursor_monitor: bool, // 多显示器：打开窗口时跟随光标所在屏幕
+    // 设置窗口已打开且被其他窗口遮挡（可见但未聚焦）时按快捷键的行为：
+    // "front" = 把设置窗口显示到最前面并聚焦；"close" = 关闭（隐藏）设置窗口
+    pub settings_hotkey_action: String,
     pub window_effect: String,       // 主面板窗口材质："default" | "acrylic" | "vibrancy" | "mica"
     pub background: BackgroundConfig, // 面板背景图设置
     pub highlight_color: String,     // 搜索命中高亮颜色（#rrggbb）；空 = 跟随主题强调色
@@ -147,6 +150,7 @@ impl Default for AppConfig {
             window_width: 420,
             window_height: 640,
             follow_cursor_monitor: true,
+            settings_hotkey_action: "front".into(),
             window_effect: "default".into(),
             background: BackgroundConfig::default(),
             highlight_color: String::new(),
@@ -3122,6 +3126,27 @@ fn show_panel(app: AppHandle) {
 }
 
 fn toggle_window(app: &AppHandle) {
+    // 设置窗口已打开且被其他窗口遮挡（可见但未聚焦）时，按配置优先处理设置窗口：
+    // "front" = 提到最前面并聚焦；"close" = 关闭（隐藏，与设置窗口点 X 的行为一致）。
+    // 本轮不再切换主面板——主面板是 alwaysOnTop，同时弹出会正好盖住提到最前的设置窗口；
+    // 设置窗口聚焦 / 关闭后再按快捷键，恢复正常的面板呼出与隐藏。
+    if let Some(sw) = app.get_webview_window("settings") {
+        if sw.is_visible().unwrap_or(false) && !sw.is_focused().unwrap_or(false) {
+            let action = app
+                .state::<AppState>()
+                .config
+                .lock()
+                .unwrap()
+                .settings_hotkey_action
+                .clone();
+            if action == "close" {
+                let _ = sw.hide();
+            } else {
+                present_window(app, "settings");
+            }
+            return;
+        }
+    }
     if let Some(win) = app.get_webview_window("main") {
         if win.is_visible().unwrap_or(false) {
             hide_panel_and_yield_focus(app);

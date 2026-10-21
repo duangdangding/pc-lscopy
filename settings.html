@@ -33,6 +33,15 @@
             <button id="hotkey-reset" class="btn">恢复默认 Ctrl+`</button>
           </div>
           <p class="desc" id="hotkey-desc">用于呼出/隐藏剪贴板面板，需包含 Ctrl / Shift / Alt / Win 中至少一个修饰键。</p>
+          <div class="row">
+            <label class="field full">设置页已打开但被其他窗口遮挡时，按快捷键：
+              <select id="settings-hotkey-action">
+                <option value="front">把设置窗口显示到最前面</option>
+                <option value="close">关闭设置窗口</option>
+              </select>
+            </label>
+          </div>
+          <p class="desc">仅当设置窗口可见但没有焦点时生效；设置窗口提到最前 / 关闭后，再按快捷键恢复正常的面板呼出与隐藏。</p>
         </section>
 
         <section class="card">
