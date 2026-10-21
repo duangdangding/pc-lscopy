@@ -1061,6 +1061,19 @@ input[type="color"]:disabled {
   color: var(--green);
 }
 
+/* 待接收卡片：有请求时出现，强调边框 */
+.tf-pending-card {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
+/* 待接收请求的自动拒绝倒计时 */
+.tf-pending-cd {
+  align-self: center;
+  font-size: 12px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
 /* 接收目录展示 */
 .tf-dir code {
   user-select: text;
@@ -1335,54 +1348,6 @@ input[type="color"]:disabled {
   100% {
     transform: translateY(0);
   }
-}
-
-/* ---------- 互传：接收确认弹窗结构化布局 ---------- */
-.recv-body {
-  display: flex;
-  gap: 12px;
-  margin-bottom: 14px;
-  text-align: left;
-  align-items: flex-start;
-}
-
-.recv-icon {
-  flex-shrink: 0;
-  width: 36px;
-  height: 36px;
-  border-radius: 8px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-  color: var(--accent);
-}
-
-.recv-icon svg {
-  width: 18px;
-  height: 18px;
-}
-
-.recv-info {
-  min-width: 0;
-}
-
-.recv-file {
-  font-weight: 600;
-  word-break: break-all;
-  user-select: text;
-}
-
-.recv-sub {
-  color: var(--text-dim);
-  font-size: 12px;
-  margin-top: 4px;
-  user-select: text;
-}
-
-.recv-ask {
-  margin-top: 8px;
-  color: var(--text);
 }
 
 /* ==================== 质感包 ==================== */

@@ -12,6 +12,15 @@
     <div class="settings-page">
       <h1>互传文件</h1>
 
+      <section class="card tf-pending-card" id="tf-pending-card" hidden>
+        <h2>待接收（<span id="tf-pending-count">0</span>）
+          <button id="tf-accept-all" class="btn small primary">全部接收</button>
+          <button id="tf-reject-all" class="btn small danger">全部拒绝</button>
+        </h2>
+        <div id="tf-pending" class="lan-list"></div>
+        <p class="desc">每个请求 60 秒未处理将自动拒绝。</p>
+      </section>
+
       <section class="card">
         <h2>发送到设备
           <button id="tf-refresh" class="btn small">刷新</button>

@@ -37,7 +37,7 @@ src/
   main.ts           主窗口前端逻辑（列表渲染、类型标签页、粘贴交互）
   settings.ts       设置页逻辑（热键、自启、数据库目录、局域网同步等）
   blocked.ts        黑名单窗口逻辑（列表 + 移出黑名单）
-  transfer.ts       互传文件窗口逻辑（实时扫描、发送、接收确认队列、传输记录）
+  transfer.ts       互传文件窗口逻辑（实时扫描、发送、待接收列表批量确认、传输记录）
   config.ts         前端共享配置
   lock.ts           安全锁定共享组件（锁定遮罩，四个窗口共用 initLockGuard）
   confirm.ts        确认对话框组件（confirmDialog 二选一 / choiceDialog 多选一）
@@ -127,8 +127,9 @@ cargo clippy           # lint
 - **互传文件**（`lan/transfer.rs`，与同步共用 HTTP 服务但**免配对**）：
   - 端点 `POST /recv?name=&size=`：接收方校验黑名单后直接流式落盘（64KB 块，不入内存）；
     保存目录沿用同步的 `download_dir`（空则回落系统下载目录），重名自动加 ` (n)`。
-  - 接收确认：`lan.transfer_auto_accept`（默认 false）关闭时弹窗等用户答复
-    （`pending_recvs` 通道 + `transfer-incoming` 事件，60s 超时自动拒绝），答复命令
+  - 接收确认：`lan.transfer_auto_accept`（默认 false）关闭时在「待接收」卡片列出等用户答复
+    （`pending_recvs` 通道 + `transfer-incoming` 事件，60s 超时自动拒绝；前端 `pendingRecvs`
+    列表支持逐个/全部接收/拒绝，每秒刷新倒计时并同步移除超时行），答复命令
     `transfer_respond_recv`；收到请求时自动弹出 transfer 窗口（mac 还要 `app.show()`）。
     拒绝/超时后排空请求体（上限 64MB）再断连，让发送方读到明确错误而非写失败。
   - 发送：在线设备直接选（`transfer_send`）或手动 IP（`transfer_send_ip`，探测配置端口 +

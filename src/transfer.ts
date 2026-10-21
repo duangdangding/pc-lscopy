@@ -3,9 +3,8 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open } from "@tauri-apps/plugin-dialog";
 import { applyAppearance, applyWindowEffect, applyWindowBackground, AppConfig, initEscClose, loadConfig } from "./config";
-import { alertDialog, choiceDialog, confirmDialog } from "./confirm";
+import { alertDialog, choiceDialog } from "./confirm";
 import { initLockGuard } from "./lock";
-import { icons } from "./icons";
 
 const $ = <T extends HTMLElement>(sel: string) => document.querySelector<T>(sel)!;
 
@@ -347,57 +346,98 @@ async function refreshHistory() {
 
 // ---------- 接收确认（手动模式） ----------
 
-// 接收确认弹窗的结构化内容：下载图标 + 文件名（加粗）+ 大小 / 来源（次要色）
-function buildRecvBody(req: TransferIncoming): HTMLElement {
-  const body = document.createElement("div");
-  body.className = "recv-body";
+// 待接收列表：多个设备/多个文件同时发来时全部列在「待接收」卡片里，
+// 可逐个或批量答复；后端每个请求 60 秒未答复自动拒绝，前端同步倒计时移除
+const RECV_CONFIRM_TIMEOUT_MS = 60_000;
 
-  const icon = document.createElement("div");
-  icon.className = "recv-icon";
-  icon.innerHTML = icons.download; // 静态图标字符串，无注入风险
-
-  const info = document.createElement("div");
-  info.className = "recv-info";
-  const file = document.createElement("div");
-  file.className = "recv-file";
-  file.textContent = req.name; // 对端传来的文件名，必须走 textContent 防注入
-  const sub = document.createElement("div");
-  sub.className = "recv-sub";
-  sub.textContent = `${fmtSize(req.size)} · 来自「${req.peer}」（${req.host}）`;
-  const ask = document.createElement("div");
-  ask.className = "recv-sub recv-ask";
-  ask.textContent = "是否接收？";
-  info.append(file, sub, ask);
-
-  body.append(icon, info);
-  return body;
+interface PendingRecv extends TransferIncoming {
+  deadline: number;
 }
 
-// 多个设备同时发来时排队逐个确认（弹窗用统一的 confirmDialog，按钮文案自定义为 接收/拒绝）
-const recvQueue: TransferIncoming[] = [];
-let recvDialogOpen = false;
+const pendingRecvs = new Map<string, PendingRecv>();
+let pendingTimer: number | undefined;
 
-async function processRecvQueue() {
-  if (recvDialogOpen) return;
-  const req = recvQueue.shift();
-  if (!req) return;
-  recvDialogOpen = true;
-  try {
-    const accept = await confirmDialog(buildRecvBody(req), {
-      okText: "接收",
-      cancelText: "拒绝",
-      cancelKind: "danger",
-    });
-    await invoke("transfer_respond_recv", { requestId: req.request_id, accept });
-  } finally {
-    recvDialogOpen = false;
-    processRecvQueue();
+function renderPendingRecvs() {
+  const card = $<HTMLElement>("#tf-pending-card");
+  const listEl = $<HTMLDivElement>("#tf-pending");
+  $("#tf-pending-count").textContent = String(pendingRecvs.size);
+  card.hidden = pendingRecvs.size === 0;
+  listEl.innerHTML = "";
+  const now = Date.now();
+  for (const p of pendingRecvs.values()) {
+    const row = document.createElement("div");
+    row.className = "lan-device";
+
+    const arrow = document.createElement("span");
+    arrow.className = "tf-arrow recv";
+    arrow.textContent = "⬇";
+
+    const meta = document.createElement("div");
+    meta.className = "lan-meta";
+    const title = document.createElement("div");
+    title.className = "lan-title";
+    title.textContent = p.name; // 对端传来的文件名，必须走 textContent 防注入
+    const sub = document.createElement("div");
+    sub.className = "lan-sub";
+    sub.textContent = `${fmtSize(p.size)} · 来自「${p.peer}」（${p.host}）`;
+    meta.append(title, sub);
+
+    const actions = document.createElement("div");
+    actions.className = "lan-actions";
+    const cd = document.createElement("span");
+    cd.className = "tf-pending-cd";
+    cd.textContent = `${Math.max(0, Math.ceil((p.deadline - now) / 1000))}s`;
+    const acceptBtn = document.createElement("button");
+    acceptBtn.className = "btn small primary";
+    acceptBtn.textContent = "接收";
+    acceptBtn.onclick = () => respondRecv(p.request_id, true);
+    const rejectBtn = document.createElement("button");
+    rejectBtn.className = "btn small danger";
+    rejectBtn.textContent = "拒绝";
+    rejectBtn.onclick = () => respondRecv(p.request_id, false);
+    actions.append(cd, acceptBtn, rejectBtn);
+
+    row.append(arrow, meta, actions);
+    listEl.appendChild(row);
   }
 }
 
+function respondRecv(requestId: string, accept: boolean) {
+  pendingRecvs.delete(requestId);
+  renderPendingRecvs();
+  invoke("transfer_respond_recv", { requestId, accept }).catch(() => {});
+}
+
+// 每秒刷新倒计时并移除已超时的行（后端同时已自动拒绝，无需再答复）
+function ensurePendingTimer() {
+  if (pendingTimer !== undefined) return;
+  pendingTimer = window.setInterval(() => {
+    const now = Date.now();
+    for (const [id, p] of pendingRecvs) {
+      if (now >= p.deadline) pendingRecvs.delete(id);
+    }
+    renderPendingRecvs();
+    if (!pendingRecvs.size && pendingTimer !== undefined) {
+      window.clearInterval(pendingTimer);
+      pendingTimer = undefined;
+    }
+  }, 1000);
+}
+
 listen<TransferIncoming>("transfer-incoming", (e) => {
-  recvQueue.push(e.payload);
-  processRecvQueue();
+  pendingRecvs.set(e.payload.request_id, {
+    ...e.payload,
+    deadline: Date.now() + RECV_CONFIRM_TIMEOUT_MS,
+  });
+  ensurePendingTimer();
+  renderPendingRecvs();
+});
+
+$("#tf-accept-all").addEventListener("click", () => {
+  for (const id of [...pendingRecvs.keys()]) respondRecv(id, true);
+});
+$("#tf-reject-all").addEventListener("click", () => {
+  for (const id of [...pendingRecvs.keys()]) respondRecv(id, false);
 });
 
 // ---------- 事件绑定 ----------
