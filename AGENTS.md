@@ -218,3 +218,11 @@ cargo clippy           # lint
      （当前 workflow 产出即非 draft，写 body 即生效）。
      核对：重新 GET，确认 body 首尾完整、assets 数量正确（通常 15 个：setup/msi/portable + 双 dmg + 双 app.tar.gz + 4 个 updater 签名 .sig（setup/msi/双 app.tar.gz）+ latest.json + 3 个 sha256sums 校验文件）。
 - `dist/`、`target/`、`node_modules/` 为构建产物，不要提交或编辑。
+
+## 排障备忘
+
+- **GitHub 网络：默认直连，代理仅作临时后备**。本机 SSH 直连 github.com 通畅（remote 为
+  `git@github.com:duangdangding/pc-lscopy.git`），`git push` / `git ls-remote` / GitHub API
+  一律先直连试；只有直连确实失败时才临时走代理（单次命令级，如 `git -c http.proxy=…` 或
+  临时设环境变量），**不要把代理写进 git config 或常驻环境变量**，用完即恢复直连。
+  排查网络问题先 `git ls-remote --heads origin main` 验证连通性，再动配置。
