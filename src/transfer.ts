@@ -59,12 +59,49 @@ interface TransferIncoming {
   device_key: string;
 }
 
+interface TransferBatchIncoming {
+  request_id: string;
+  peer: string;
+  host: string;
+  device_key: string;
+  files: { name: string; size: number }[];
+}
+
 // ---------- 状态 ----------
 
 let selectedDeviceId: string | null = null;
 let sending = false;
 let sweeping = false;
 let devices: LanDeviceDto[] = [];
+
+// 发送文件列表：发送时逐项显示状态（等待/传输中/完成）
+interface SendItem {
+  name: string;
+  state: "pending" | "sending" | "done";
+}
+let sendItems: SendItem[] = [];
+
+function baseName(p: string): string {
+  return p.split(/[\\/]/).filter(Boolean).pop() || p;
+}
+
+function renderSendList() {
+  const el = $<HTMLDivElement>("#tf-send-list");
+  el.hidden = sendItems.length === 0;
+  el.innerHTML = "";
+  for (const f of sendItems) {
+    const row = document.createElement("div");
+    row.className = `tf-send-item ${f.state}`;
+    const st = document.createElement("span");
+    st.className = "st";
+    st.textContent = f.state === "done" ? "✓" : f.state === "sending" ? "⟳" : "○";
+    const nm = document.createElement("span");
+    nm.className = "nm";
+    nm.textContent = f.name;
+    row.append(st, nm);
+    el.appendChild(row);
+  }
+}
 
 // ---------- 工具 ----------
 
@@ -173,6 +210,8 @@ async function sendPaths(paths: string[], target: { deviceId?: string; ip?: stri
   cancelBtn.disabled = false;
   cancelBtn.textContent = "取消发送";
   showProgress(true);
+  sendItems = paths.map((p) => ({ name: baseName(p), state: "pending" as const }));
+  renderSendList();
   try {
     const msg = target.ip
       ? await invoke<string>("transfer_send_ip", { ip: target.ip, paths })
@@ -249,6 +288,8 @@ function showProgress(show: boolean) {
   if (!show) {
     $<HTMLDivElement>("#tf-progress-fill").style.width = "0%";
     $("#tf-progress-text").textContent = "";
+    sendItems = [];
+    renderSendList();
   }
 }
 
@@ -350,21 +391,33 @@ async function refreshHistory() {
 // 待接收列表：多个设备/多个文件同时发来时全部列在「待接收」卡片里，
 // 可逐个或批量答复；后端每个请求 60 秒未答复自动拒绝，前端同步倒计时移除
 const RECV_CONFIRM_TIMEOUT_MS = 60_000;
+// 批量清单确认超时与后端一致（120 秒）
+const BATCH_CONFIRM_TIMEOUT_MS = 120_000;
 
 interface PendingRecv extends TransferIncoming {
   deadline: number;
 }
 
+interface PendingBatch extends TransferBatchIncoming {
+  deadline: number;
+}
+
 const pendingRecvs = new Map<string, PendingRecv>();
+const pendingBatches = new Map<string, PendingBatch>();
 let pendingTimer: number | undefined;
 
 function renderPendingRecvs() {
   const card = $<HTMLElement>("#tf-pending-card");
   const listEl = $<HTMLDivElement>("#tf-pending");
-  $("#tf-pending-count").textContent = String(pendingRecvs.size);
-  card.hidden = pendingRecvs.size === 0;
+  const totalCount = pendingBatches.size + pendingRecvs.size;
+  $("#tf-pending-count").textContent = String(totalCount);
+  card.hidden = totalCount === 0;
   listEl.innerHTML = "";
   const now = Date.now();
+  // 批量清单在前，单文件请求在后
+  for (const b of pendingBatches.values()) {
+    listEl.appendChild(buildBatchRow(b, now));
+  }
   for (const p of pendingRecvs.values()) {
     const row = document.createElement("div");
     row.className = "lan-device";
@@ -408,10 +461,98 @@ function renderPendingRecvs() {
   }
 }
 
+// 批量清单行：头部（标题/来源/倒计时/按钮）+ 逐个勾选的文件列表
+function buildBatchRow(b: PendingBatch, now: number): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "lan-device tf-batch";
+
+  const head = document.createElement("div");
+  head.className = "tf-batch-head";
+
+  const arrow = document.createElement("span");
+  arrow.className = "tf-arrow recv";
+  arrow.textContent = "⬇";
+
+  const meta = document.createElement("div");
+  meta.className = "lan-meta";
+  const totalSize = b.files.reduce((acc, f) => acc + f.size, 0);
+  const title = document.createElement("div");
+  title.className = "lan-title";
+  title.textContent = `批量接收 ${b.files.length} 个文件（共 ${fmtSize(totalSize)}）`;
+  const sub = document.createElement("div");
+  sub.className = "lan-sub";
+  sub.textContent = `来自「${b.peer}」（${b.host}）· 勾选要接收的文件`;
+  meta.append(title, sub);
+
+  const actions = document.createElement("div");
+  actions.className = "lan-actions";
+  const cd = document.createElement("span");
+  cd.className = "tf-pending-cd";
+  cd.textContent = `${Math.max(0, Math.ceil((b.deadline - now) / 1000))}s`;
+  const acceptBtn = document.createElement("button");
+  acceptBtn.className = "btn small primary";
+  acceptBtn.textContent = "接收所选";
+  const rejectBtn = document.createElement("button");
+  rejectBtn.className = "btn small danger";
+  rejectBtn.textContent = "全部拒绝";
+  actions.append(cd, acceptBtn, rejectBtn);
+  head.append(arrow, meta, actions);
+
+  // 文件勾选列表（默认全选；全选开关放在列表顶部）
+  const filesEl = document.createElement("div");
+  filesEl.className = "tf-batch-files";
+  const boxes: HTMLInputElement[] = [];
+  const allLabel = document.createElement("label");
+  allLabel.className = "tf-batch-all";
+  const allBox = document.createElement("input");
+  allBox.type = "checkbox";
+  allBox.checked = true;
+  const allText = document.createElement("span");
+  allText.textContent = "全选";
+  allLabel.append(allBox, allText);
+  filesEl.appendChild(allLabel);
+  b.files.forEach((f) => {
+    const label = document.createElement("label");
+    label.className = "tf-batch-file";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = true;
+    const nameSpan = document.createElement("span");
+    nameSpan.className = "tf-batch-name";
+    nameSpan.textContent = f.name; // 对端传来的文件名，必须走 textContent 防注入
+    const sizeSpan = document.createElement("span");
+    sizeSpan.className = "tf-batch-size";
+    sizeSpan.textContent = fmtSize(f.size);
+    label.append(box, nameSpan, sizeSpan);
+    boxes.push(box);
+    filesEl.appendChild(label);
+  });
+  allBox.onchange = () => {
+    for (const bx of boxes) bx.checked = allBox.checked;
+  };
+
+  acceptBtn.onclick = () => {
+    const accepted = boxes
+      .map((bx, i) => (bx.checked ? i : -1))
+      .filter((i) => i >= 0);
+    respondBatch(b.request_id, accepted);
+  };
+  rejectBtn.onclick = () => respondBatch(b.request_id, []);
+
+  row.append(head, filesEl);
+  return row;
+}
+
 function respondRecv(requestId: string, accept: boolean, remember = false) {
   pendingRecvs.delete(requestId);
   renderPendingRecvs();
   invoke("transfer_respond_recv", { requestId, accept, remember }).catch(() => {});
+}
+
+function respondBatch(requestId: string, accepted: number[]) {
+  pendingBatches.delete(requestId);
+  renderPendingRecvs();
+  invoke("transfer_respond_batch", { requestId, accepted }).catch(() => {});
 }
 
 // 每秒刷新倒计时并移除已超时的行（后端同时已自动拒绝，无需再答复）
@@ -422,8 +563,11 @@ function ensurePendingTimer() {
     for (const [id, p] of pendingRecvs) {
       if (now >= p.deadline) pendingRecvs.delete(id);
     }
+    for (const [id, b] of pendingBatches) {
+      if (now >= b.deadline) pendingBatches.delete(id);
+    }
     renderPendingRecvs();
-    if (!pendingRecvs.size && pendingTimer !== undefined) {
+    if (!pendingRecvs.size && !pendingBatches.size && pendingTimer !== undefined) {
       window.clearInterval(pendingTimer);
       pendingTimer = undefined;
     }
@@ -439,10 +583,23 @@ listen<TransferIncoming>("transfer-incoming", (e) => {
   renderPendingRecvs();
 });
 
+listen<TransferBatchIncoming>("transfer-batch-incoming", (e) => {
+  pendingBatches.set(e.payload.request_id, {
+    ...e.payload,
+    deadline: Date.now() + BATCH_CONFIRM_TIMEOUT_MS,
+  });
+  ensurePendingTimer();
+  renderPendingRecvs();
+});
+
 $("#tf-accept-all").addEventListener("click", () => {
+  for (const [id, b] of [...pendingBatches]) {
+    respondBatch(id, b.files.map((_, i) => i));
+  }
   for (const id of [...pendingRecvs.keys()]) respondRecv(id, true);
 });
 $("#tf-reject-all").addEventListener("click", () => {
+  for (const id of [...pendingBatches.keys()]) respondBatch(id, []);
   for (const id of [...pendingRecvs.keys()]) respondRecv(id, false);
 });
 
@@ -544,6 +701,17 @@ getCurrentWebviewWindow()
 listen<TransferProgress>("transfer-progress", (e) => {
   const p = e.payload;
   showProgress(true);
+  // 发送文件列表：按文件名定位当前项，之前的标记完成，完成帧把当前项也标记完成
+  if (p.direction === "send" && sendItems.length) {
+    const idx = sendItems.findIndex((f) => f.name === p.name && f.state !== "done");
+    if (idx >= 0) {
+      for (let i = 0; i < idx; i++) {
+        if (sendItems[i].state === "pending") sendItems[i].state = "done";
+      }
+      sendItems[idx].state = p.total > 0 && p.sent >= p.total ? "done" : "sending";
+      renderSendList();
+    }
+  }
   const pct = p.total > 0 ? Math.min(100, Math.round((p.sent / p.total) * 100)) : 0;
   $<HTMLDivElement>("#tf-progress-fill").style.width = `${pct}%`;
   const verb = p.direction === "send" ? "发送到" : "接收自";

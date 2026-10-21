@@ -29,6 +29,14 @@ const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 const CONFIRM_TIMEOUT_SECS: u64 = 60;
 /// 「本批都接收」临时免确认时长（秒，滑动续期：每自动接收一个文件重新计时）
 const TRUST_BATCH_SECS: u64 = 600;
+/// 批量清单确认等待超时（秒）：用户要逐个勾选文件，给足两分钟
+const BATCH_CONFIRM_TIMEOUT_SECS: u64 = 120;
+/// 批量清单请求体上限（文件名清单，1MB 足够数百个文件）
+const BATCH_MANIFEST_CAP: u64 = 1024 * 1024;
+/// 已勾选批次的保留时长（秒）：清单确认后文件传输最长可间隔这么久
+const BATCH_KEEP_SECS: u64 = 1800;
+/// 单个批次最大文件数（防超大清单耗尽内存）
+const BATCH_MAX_FILES: usize = 500;
 /// 拒绝接收时排空请求体的上限（防止对端虚报超大 Content-Length 导致一直读）
 const DRAIN_CAP: u64 = 64 * 1024 * 1024;
 
@@ -289,8 +297,14 @@ pub fn handle_recv(
         }
     };
 
-    // 默认手动确认：待接收列表等待用户答复（开启「自动接收」或「本批都接收」临时免确认则跳过）
-    if !auto_accept && !batch_trusted {
+    // 批量清单命中：该文件在对方已勾选的批次内，免确认直接收
+    let batch_hit = headers
+        .get("x-batch-id")
+        .map(|bid| consume_batch_accept(app, bid, &name, total))
+        .unwrap_or(false);
+
+    // 默认手动确认：待接收列表等待用户答复（开启「自动接收」/「本批都接收」临时免确认/批量清单已勾选则跳过）
+    if !auto_accept && !batch_trusted && !batch_hit {
         let (accepted, err_code) =
             match ask_recv_approval(app, &peer, &name, total, client_ip, &dev_key) {
             Some(true) => (true, 0),
@@ -376,6 +390,200 @@ pub fn handle_recv(
             respond_json(stream, 500, &body);
         }
     }
+}
+
+// ---------- 批量清单：POST /batch ----------
+
+/// 批量清单命中：该文件在已勾选的批次内则消耗一条并免确认；批次清空/过期后移除
+fn consume_batch_accept(app: &AppHandle, batch_id: &str, name: &str, size: u64) -> bool {
+    let state = app.state::<AppState>();
+    let mut m = state.lan.transfer_batches.lock().unwrap();
+    let Some((created, entries)) = m.get_mut(batch_id) else {
+        return false;
+    };
+    if created.elapsed() > Duration::from_secs(BATCH_KEEP_SECS) {
+        m.remove(batch_id);
+        return false;
+    }
+    if let Some(pos) = entries.iter().position(|(n, s)| n == name && *s == size) {
+        entries.remove(pos);
+        if entries.is_empty() {
+            m.remove(batch_id);
+        }
+        return true;
+    }
+    false
+}
+
+/// 读完整的小请求体（清单 JSON；body_start 是读请求头时已带出的开头）
+fn read_small_body(
+    stream: &mut TcpStream,
+    mut body: Vec<u8>,
+    total: u64,
+) -> Result<Vec<u8>, String> {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+    while (body.len() as u64) < total {
+        let mut tmp = [0u8; 8192];
+        let n = stream
+            .read(&mut tmp)
+            .map_err(|e| format!("读取清单失败: {e}"))?;
+        if n == 0 {
+            return Err("连接提前关闭".into());
+        }
+        body.extend_from_slice(&tmp[..n]);
+    }
+    body.truncate(total as usize);
+    Ok(body)
+}
+
+/// 批量接收请求：发送方先交文件清单，用户在待接收列表逐个勾选后只接收所选文件。
+/// 响应 200 {"accepted":[序号...]}；旧版无此端点返回 404，发送方回退逐文件发送
+pub fn handle_batch(
+    app: &AppHandle,
+    stream: &mut TcpStream,
+    headers: &HashMap<String, String>,
+    client_ip: &str,
+    body_start: Vec<u8>,
+) {
+    // 黑名单设备直接拒绝
+    if reject_if_blocked(app, stream, headers) {
+        return;
+    }
+    let total: u64 = match headers
+        .get("content-length")
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        Some(v) if v <= BATCH_MANIFEST_CAP => v,
+        _ => {
+            respond_json(stream, 400, r#"{"error":"bad_request"}"#);
+            return;
+        }
+    };
+    let body = match read_small_body(stream, body_start, total) {
+        Ok(b) => b,
+        Err(e) => {
+            respond_json(stream, 400, &format!(r#"{{"error":"{e}"}}"#));
+            return;
+        }
+    };
+    let manifest: Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(_) => {
+            respond_json(stream, 400, r#"{"error":"bad_json"}"#);
+            return;
+        }
+    };
+    let batch_id = manifest
+        .get("batchId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let mut files: Vec<(String, u64)> = Vec::new();
+    if let Some(arr) = manifest.get("files").and_then(|v| v.as_array()) {
+        for f in arr.iter().take(BATCH_MAX_FILES) {
+            let name = sanitize_file_name(f.get("name").and_then(|v| v.as_str()).unwrap_or(""));
+            let size = f.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+            files.push((name, size));
+        }
+    }
+    if batch_id.is_empty() || files.is_empty() {
+        respond_json(stream, 400, r#"{"error":"bad_manifest"}"#);
+        return;
+    }
+
+    // 对端显示名与设备标识（与 /recv 同口径）
+    let state = app.state::<AppState>();
+    let (peer, auto_accept) = {
+        let s = state.lan.settings.lock().unwrap();
+        let peer = headers
+            .get("x-device-name")
+            .map(|n| url_decode(n))
+            .filter(|n| !n.is_empty())
+            .or_else(|| {
+                headers
+                    .get("x-device-id")
+                    .and_then(|id| s.paired.get(id))
+                    .map(|d| d.name.clone())
+            })
+            .unwrap_or_else(|| client_ip.to_string());
+        (peer, s.transfer_auto_accept)
+    };
+    let dev_key = headers
+        .get("x-device-id")
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .unwrap_or_else(|| client_ip.to_string());
+
+    // 「自动接收」/「本批都接收」临时免确认：整批直接收（命中时续期）
+    let trusted = {
+        let mut m = state.lan.transfer_trusted.lock().unwrap();
+        match m.get_mut(&dev_key) {
+            Some(t) if t.elapsed() < Duration::from_secs(TRUST_BATCH_SECS) => {
+                *t = Instant::now();
+                true
+            }
+            _ => {
+                m.remove(&dev_key);
+                false
+            }
+        }
+    };
+
+    let accepted: Vec<usize> = if auto_accept || trusted {
+        (0..files.len()).collect()
+    } else {
+        // 弹出互传窗口，等待用户在待接收列表勾选（超时按全部拒绝）
+        crate::present_window(app, "transfer");
+        #[cfg(target_os = "macos")]
+        let _ = app.show();
+        let req_id = format!("{:016x}", rand_u64());
+        let (tx, rx) = mpsc::channel();
+        state
+            .lan
+            .pending_batches
+            .lock()
+            .unwrap()
+            .insert(req_id.clone(), tx);
+        let _ = app.emit(
+            "transfer-batch-incoming",
+            json!({
+                "request_id": req_id,
+                "peer": peer,
+                "host": client_ip,
+                "device_key": dev_key,
+                "files": files.iter().map(|(n, s)| json!({"name": n, "size": s})).collect::<Vec<_>>(),
+            }),
+        );
+        let r = rx.recv_timeout(Duration::from_secs(BATCH_CONFIRM_TIMEOUT_SECS));
+        state.lan.pending_batches.lock().unwrap().remove(&req_id);
+        match r {
+            Ok(mut idx) => {
+                idx.retain(|i| *i < files.len());
+                idx.sort_unstable();
+                idx.dedup();
+                idx
+            }
+            Err(_) => {
+                respond_json(stream, 409, r#"{"error":"confirm_timeout"}"#);
+                return;
+            }
+        }
+    };
+
+    if accepted.is_empty() {
+        respond_json(stream, 200, r#"{"result":"ok","accepted":[]}"#);
+        return;
+    }
+    // 登记已勾选的文件，后续带 X-Batch-Id 的文件传输免确认
+    let entries: Vec<(String, u64)> = accepted.iter().map(|i| files[*i].clone()).collect();
+    state
+        .lan
+        .transfer_batches
+        .lock()
+        .unwrap()
+        .insert(batch_id, (Instant::now(), entries));
+    let body = json!({ "result": "ok", "accepted": accepted }).to_string();
+    respond_json(stream, 200, &body);
 }
 
 /// 把请求体流式解密落盘；pending 缓冲保证每次解密都从 8 字节对齐的全局偏移开始
@@ -563,7 +771,7 @@ fn read_simple_response(stream: &mut TcpStream) -> Result<HttpResp, LanErr> {
     })
 }
 
-/// 发送单个文件；返回发送的字节数
+/// 发送单个文件；返回发送的字节数。batch_id 非空时带 X-Batch-Id 头（批量清单已勾选，对方免确认）
 fn send_one(
     app: &AppHandle,
     target: &SendTarget,
@@ -571,6 +779,7 @@ fn send_one(
     name: &str,
     index: usize,
     count: usize,
+    batch_id: Option<&str>,
 ) -> Result<u64, LanErr> {
     let mut file = File::open(file_path).map_err(|e| LanErr::Net(format!("打开文件失败: {e}")))?;
     let total = file.metadata().map(|m| m.len()).unwrap_or(0);
@@ -620,6 +829,9 @@ fn send_one(
     );
     if let Some(n) = nonce {
         req.push_str(&format!("X-Enc: 1\r\nX-Enc-Nonce: {n:016x}\r\n"));
+    }
+    if let Some(b) = batch_id {
+        req.push_str(&format!("X-Batch-Id: {b}\r\n"));
     }
     req.push_str("\r\n");
     stream
@@ -705,19 +917,125 @@ fn send_one(
     }
 }
 
-/// 向目标发送一批文件（逐个推送，单个失败不中断后续），返回汇总消息。
-/// 发送不写传输记录：记录只保留「接收成功」的条目（发送结果通过弹窗/进度反馈）
-fn send_paths_to(app: &AppHandle, target: &SendTarget, paths: Vec<String>) -> String {
-    let count = paths.len();
-    let mut ok_count = 0usize;
-    let mut cancelled = false;
-    let mut failures: Vec<String> = Vec::new();
-    for (i, p) in paths.iter().enumerate() {
-        // 用户取消：当前文件已在 send_one 内中断，剩余文件直接跳过
-        if app.state::<AppState>().lan.transfer_cancel.load(Ordering::SeqCst) {
-            cancelled = true;
-            break;
+/// 批量清单提议结果
+enum BatchProposal {
+    /// 对方支持批量协议：返回其勾选的文件序号（空 = 全部拒绝）
+    Accepted(Vec<usize>),
+    /// 对方是旧版（无 /batch 端点）：回退逐文件发送
+    NotSupported,
+    /// 出错（连接失败 / 被拉黑 / 超时等）
+    Failed(String),
+}
+
+/// 先发送批量清单：对方在待接收列表勾选后返回接受的文件序号
+fn propose_batch(
+    app: &AppHandle,
+    target: &SendTarget,
+    batch_id: &str,
+    files: &[(PathBuf, String, u64)],
+) -> BatchProposal {
+    let addr = match format!("{}:{}", target.host, target.port)
+        .as_str()
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut it| it.next())
+    {
+        Some(a) => a,
+        None => return BatchProposal::Failed("地址解析失败".into()),
+    };
+    let mut stream = match TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
+        Ok(s) => s,
+        Err(e) => return BatchProposal::Failed(format!("连接失败: {e}")),
+    };
+    // 清单确认最多 BATCH_CONFIRM_TIMEOUT_SECS 秒，读超时留足余量；写超时只保护小包写出
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(BATCH_CONFIRM_TIMEOUT_SECS + 30)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
+    // 注册活动连接：取消命令可 shutdown 它，中断等待确认的阻塞读
+    {
+        let state = app.state::<AppState>();
+        *state.lan.transfer_active.lock().unwrap() = stream.try_clone().ok();
+    }
+
+    let manifest = json!({
+        "batchId": batch_id,
+        "files": files.iter().map(|(_, n, s)| json!({"name": n, "size": s})).collect::<Vec<_>>(),
+    })
+    .to_string();
+    let (my_id, my_name) = {
+        let state = app.state::<AppState>();
+        let s = state.lan.settings.lock().unwrap();
+        (s.device_id.clone(), s.device_name.clone())
+    };
+    let req = format!(
+        "POST /batch HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\nX-Device-Id: {my_id}\r\nX-Device-Name: {}\r\nX-Device-Model: {}\r\n\r\n",
+        target.host,
+        target.port,
+        manifest.len(),
+        url_encode(&my_name),
+        url_encode(&device_model()),
+    );
+    let result = (|| {
+        if stream
+            .write_all(req.as_bytes())
+            .and_then(|_| stream.write_all(manifest.as_bytes()))
+            .is_err()
+        {
+            return BatchProposal::Failed("发送清单失败".into());
         }
+        if app
+            .state::<AppState>()
+            .lan
+            .transfer_cancel
+            .load(Ordering::SeqCst)
+        {
+            return BatchProposal::Failed("已取消发送".into());
+        }
+        let resp = match read_simple_response(&mut stream) {
+            Ok(r) => r,
+            Err(e) => {
+                if app
+                    .state::<AppState>()
+                    .lan
+                    .transfer_cancel
+                    .load(Ordering::SeqCst)
+                {
+                    return BatchProposal::Failed("已取消发送".into());
+                }
+                return BatchProposal::Failed(e.to_string());
+            }
+        };
+        match resp.code {
+            200 => {
+                let v: Value = serde_json::from_slice(&resp.body).unwrap_or(Value::Null);
+                let acc = v
+                    .get("accepted")
+                    .and_then(|a| a.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|x| x.as_u64().map(|i| i as usize))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                BatchProposal::Accepted(acc)
+            }
+            // 旧版对端（含旧版安卓）无 /batch 端点
+            404 => BatchProposal::NotSupported,
+            409 => BatchProposal::Failed("等待对方确认超时".into()),
+            403 => BatchProposal::Failed("对方拒绝接收（可能已被对方拉黑）".into()),
+            c => BatchProposal::Failed(format!("批量请求失败: HTTP {c}")),
+        }
+    })();
+    *app.state::<AppState>().lan.transfer_active.lock().unwrap() = None;
+    result
+}
+
+/// 向目标发送一批文件：先交清单给对方勾选（新版协议），对方是旧版时回退逐文件发送。
+/// 单个失败不中断后续；发送不写传输记录：记录只保留「接收成功」的条目（发送结果通过弹窗/进度反馈）
+fn send_paths_to(app: &AppHandle, target: &SendTarget, paths: Vec<String>) -> String {
+    // 汇总文件清单：文件夹不支持发送
+    let mut files: Vec<(PathBuf, String, u64)> = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
+    for p in &paths {
         let path = PathBuf::from(p);
         let name = path
             .file_name()
@@ -727,7 +1045,50 @@ fn send_paths_to(app: &AppHandle, target: &SendTarget, paths: Vec<String>) -> St
             failures.push(format!("{name}：暂不支持发送文件夹"));
             continue;
         }
-        match send_one(app, target, &path, &name, i + 1, count) {
+        let size = path.metadata().map(|m| m.len()).unwrap_or(0);
+        files.push((path, name, size));
+    }
+    if files.is_empty() {
+        return if failures.is_empty() {
+            "未选择文件".to_string()
+        } else {
+            failures.join("\n")
+        };
+    }
+
+    // 先交批量清单（对方勾选要收的文件）；旧版对端回退逐文件发送（逐个确认）
+    let batch_id = format!("{:016x}", rand_u64());
+    let plan: Vec<(usize, Option<String>)> = match propose_batch(app, target, &batch_id, &files) {
+        BatchProposal::Accepted(acc) if acc.is_empty() => {
+            return format!("对方拒收了全部 {} 个文件", files.len());
+        }
+        BatchProposal::Accepted(acc) => {
+            let rejected = files.len() - acc.len();
+            if rejected > 0 {
+                failures.push(format!("对方拒收 {rejected} 个文件"));
+            }
+            acc.into_iter().map(|i| (i, Some(batch_id.clone()))).collect()
+        }
+        BatchProposal::NotSupported => (0..files.len()).map(|i| (i, None)).collect(),
+        BatchProposal::Failed(msg) => return msg,
+    };
+
+    let count = plan.len();
+    let mut ok_count = 0usize;
+    let mut cancelled = false;
+    for (seq, (idx, bid)) in plan.iter().enumerate() {
+        // 用户取消：当前文件已在 send_one 内中断，剩余文件直接跳过
+        if app
+            .state::<AppState>()
+            .lan
+            .transfer_cancel
+            .load(Ordering::SeqCst)
+        {
+            cancelled = true;
+            break;
+        }
+        let (path, name, _) = &files[*idx];
+        match send_one(app, target, path, name, seq + 1, count, bid.as_deref()) {
             Ok(_) => ok_count += 1,
             Err(e) => {
                 let msg = e.to_string();
@@ -833,6 +1194,20 @@ pub fn transfer_respond_recv(
                 .insert(key, Instant::now());
         }
         let _ = tx.send(accept);
+    }
+}
+
+/// 批量接收请求的答复：accepted 为用户勾选的文件序号（空数组 = 全部拒绝）
+#[tauri::command]
+pub fn transfer_respond_batch(state: State<AppState>, request_id: String, accepted: Vec<usize>) {
+    if let Some(tx) = state
+        .lan
+        .pending_batches
+        .lock()
+        .unwrap()
+        .remove(&request_id)
+    {
+        let _ = tx.send(accepted);
     }
 }
 

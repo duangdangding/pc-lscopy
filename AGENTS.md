@@ -134,6 +134,14 @@ cargo clippy           # lint
     `transfer_trusted`，10 分钟滑动期内后续文件免确认直收，每收一个重新计时）；
     收到请求时自动弹出 transfer 窗口（mac 还要 `app.show()`）。
     拒绝/超时后排空请求体（上限 64MB）再断连，让发送方读到明确错误而非写失败。
+  - **批量清单**：发送方一次选多个文件时先 `POST /batch`（JSON：`batchId` + `files` 名称/大小
+    列表，上限 1MB / 500 个文件）：自动接收或命中 `transfer_trusted` 时整批直收；否则
+    `transfer-batch-incoming` 事件弹到「待接收」列表，用户逐个勾选后 `transfer_respond_batch`
+    答复（`pending_batches` 通道，120s 超时按全拒处理返回 409）。确认的勾选结果登记进
+    `transfer_batches`（30 分钟有效，按 name+size 逐条消耗）；随后逐个 `POST /recv` 带
+    `X-Batch-Id` 头命中即免确认。旧版对端返回 404，发送方自动回退逐文件发送（逐个确认），
+    协议完全后向兼容。发送侧弹窗内 `#tf-send-list` 列出全部待传文件，按 `transfer-progress`
+    事件实时推进每行状态。
   - 发送：在线设备直接选（`transfer_send`）或手动 IP（`transfer_send_ip`，探测配置端口 +
     8765 的 `/info`）；已配对设备用对方配对码做 XOR 流加密（X-Enc-Nonce 头），未配对明文；
     旧版应用/安卓端无 `/recv`，发送方按 404 提示「对方版本过旧」。

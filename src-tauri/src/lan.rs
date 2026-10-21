@@ -165,6 +165,9 @@ pub(crate) struct Discovered {
     last_seen: Instant,
 }
 
+/// 已勾选批次的登记项：（登记时刻，剩余待收文件 (name, size)）
+pub type BatchAccept = (Instant, Vec<(String, u64)>);
+
 /// LAN 模块的共享状态（挂在 AppState 上）
 pub struct LanShared {
     pub settings: Mutex<LanSettings>,
@@ -176,6 +179,10 @@ pub struct LanShared {
     pub pending_recvs: Mutex<HashMap<String, (String, mpsc::Sender<bool>)>>,
     /// 「本批都接收」临时免确认：设备标识（deviceId，无则 IP）→ 最近一次接收时刻（10 分钟滑动有效）
     pub transfer_trusted: Mutex<HashMap<String, Instant>>,
+    /// 等待用户勾选的批量接收请求：requestId → 答复通道（勾选的文件序号列表）
+    pub pending_batches: Mutex<HashMap<String, mpsc::Sender<Vec<usize>>>>,
+    /// 已勾选确认的批量清单：batchId →（登记时刻，剩余待收文件 (name, size)）
+    pub transfer_batches: Mutex<HashMap<String, BatchAccept>>,
     pub server_running: AtomicBool,
     /// 实际监听端口（配置端口被占用时由系统分配）
     pub actual_port: AtomicU64,
@@ -197,6 +204,8 @@ impl LanShared {
             pending_pairs: Mutex::new(HashMap::new()),
             pending_recvs: Mutex::new(HashMap::new()),
             transfer_trusted: Mutex::new(HashMap::new()),
+            pending_batches: Mutex::new(HashMap::new()),
+            transfer_batches: Mutex::new(HashMap::new()),
             server_running: AtomicBool::new(false),
             actual_port: AtomicU64::new(0),
             syncing: Mutex::new(HashSet::new()),
@@ -652,6 +661,9 @@ fn handle_conn(app: AppHandle, mut stream: TcpStream) {
         ("GET", "/file") => handle_file(&app, &mut stream, &headers, &query, &client_ip),
         ("POST", "/recv") => {
             transfer::handle_recv(&app, &mut stream, &headers, &query, &client_ip, body_start)
+        }
+        ("POST", "/batch") => {
+            transfer::handle_batch(&app, &mut stream, &headers, &client_ip, body_start)
         }
         _ => respond_json(&mut stream, 404, "Not Found"),
     }

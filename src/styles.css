@@ -1074,6 +1074,92 @@ input[type="color"]:disabled {
   font-variant-numeric: tabular-nums;
 }
 
+/* 批量待收：行内展开的勾选文件列表 */
+.tf-batch {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.tf-batch-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.tf-batch-files {
+  margin: 8px 0 0 30px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.tf-batch-all,
+.tf-batch-file {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.tf-batch-all {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.tf-batch-file .tf-batch-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tf-batch-file .tf-batch-size {
+  color: var(--text-dim);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+/* 发送文件列表（等待/传输中/完成） */
+.tf-send-list {
+  margin: 6px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.tf-send-item {
+  display: flex;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.tf-send-item .st {
+  width: 14px;
+  flex-shrink: 0;
+  text-align: center;
+}
+
+.tf-send-item .nm {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tf-send-item.sending {
+  color: var(--text);
+}
+
+.tf-send-item.done {
+  color: var(--green);
+}
+
 /* 接收目录展示 */
 .tf-dir code {
   user-select: text;

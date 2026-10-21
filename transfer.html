@@ -18,7 +18,7 @@
           <button id="tf-reject-all" class="btn small danger">全部拒绝</button>
         </h2>
         <div id="tf-pending" class="lan-list"></div>
-        <p class="desc">每个请求 60 秒未处理将自动拒绝；点「本批都接收」后，该设备 10 分钟内的后续文件自动接收（每收一个重新计时）。</p>
+        <p class="desc">单文件请求 60 秒、批量清单 120 秒未处理将自动拒绝；点「本批都接收」后，该设备 10 分钟内的后续文件自动接收（每收一个重新计时）。</p>
       </section>
 
       <section class="card">
@@ -39,6 +39,7 @@
         <div id="tf-progress" class="tf-progress" hidden>
           <div class="tf-progress-bar"><div id="tf-progress-fill" class="tf-progress-fill"></div></div>
           <p class="desc" id="tf-progress-text"></p>
+          <div id="tf-send-list" class="tf-send-list" hidden></div>
           <button id="tf-cancel" class="btn small">取消发送</button>
         </div>
       </section>
