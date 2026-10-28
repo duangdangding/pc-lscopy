@@ -49,6 +49,14 @@ let animateOnNextRender = false;
 // ---------- 类型标签页：全部 / 图片 / 视频 / 文字 / 办公 / 其他 ----------
 // 分类由后端 category 字段给出："text" 纯文本 | "image" 图片 | "video" 视频 | "office" 办公/文本文件 | "file" 其他文件
 type TabKey = "all" | "image" | "video" | "text" | "office" | "other";
+const TAB_LIMITS: Record<TabKey, number> = {
+  all: 500,
+  image: 100,
+  video: 100,
+  text: 500,
+  office: 100,
+  other: 100,
+};
 let activeTab: TabKey = "all";
 
 function matchTab(c: Clip): boolean {
@@ -72,10 +80,10 @@ tabsEl.querySelectorAll<HTMLButtonElement>(".tab").forEach((btn) => {
   };
 });
 
-// ---------- 标签页数量徽标：显示当前搜索条件下各类型的记录数 ----------
+// ---------- 标签页数量徽标：显示当前搜索条件下各类型可展示的条数（非数据库总数） ----------
 function updateTabCounts(all: Clip[]) {
   const counts: Record<TabKey, number> = {
-    all: all.length,
+    all: Math.min(all.length, TAB_LIMITS.all),
     image: 0,
     video: 0,
     text: 0,
@@ -91,7 +99,7 @@ function updateTabCounts(all: Clip[]) {
   }
   tabsEl.querySelectorAll<HTMLButtonElement>(".tab").forEach((btn) => {
     const key = (btn.dataset.tab as TabKey) || "all";
-    const n = counts[key] ?? 0;
+    const n = Math.min(counts[key] ?? 0, TAB_LIMITS[key]);
     let badge = btn.querySelector<HTMLSpanElement>(".tab-count");
     if (!badge) {
       badge = document.createElement("span");
@@ -238,7 +246,7 @@ async function refresh(keepSelection = false) {
   const all = await invoke<Clip[]>("list_clips", {
     keyword: keyword.trim() || null,
   });
-  clips = all.filter(matchTab);
+  clips = all.filter(matchTab).slice(0, TAB_LIMITS[activeTab]);
   updateTabCounts(all);
   emptyEl.style.display = clips.length ? "none" : "block";
   updateEmpty();

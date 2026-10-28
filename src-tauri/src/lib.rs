@@ -1471,23 +1471,61 @@ fn ignore_current_clipboard(state: &AppState) {
 #[tauri::command]
 fn list_clips(state: State<AppState>, keyword: Option<String>) -> Vec<Clip> {
     let db = state.db.lock().unwrap();
-    // 列表查询不读取 image blob，图片由前端懒加载（get_clip_image），避免大数据量卡顿
-    let (sql, kw): (&str, Option<String>) = match &keyword {
-        Some(k) if !k.trim().is_empty() => (
-            // 拼音列在入库时生成（中文转无声调全拼/首字母，其余字符小写），
-            // SQLite LIKE 对 ASCII 不区分大小写，大写输入也能命中
-            "SELECT id, kind, content, width, height, pinned, created_at FROM clips
-             WHERE content LIKE ?1 OR pinyin_full LIKE ?1 OR pinyin_abbr LIKE ?1
-             ORDER BY pinned DESC, created_at DESC LIMIT 500",
-            Some(format!("%{}%", k.trim())),
-        ),
-        _ => (
-            "SELECT id, kind, content, width, height, pinned, created_at FROM clips
-             ORDER BY pinned DESC, created_at DESC LIMIT 500",
-            None,
-        ),
+    // 列表查询不读取 image blob，图片由前端懒加载（get_clip_image），避免大数据量卡顿。
+    // 「全部」与「文字」各取 500 条，其余分类各取 100 条；分类独立限额，避免被全局 500 条挤占。
+    // 文件分类沿用 category_of 的扩展名表，SQL 只取第一个文件路径末尾的扩展名做匹配。
+    let first_path = "lower(substr(content, 1, instr(content || char(10), char(10)) - 1))";
+    let ext_matches = |exts: &[&str]| {
+        exts.iter()
+            .map(|e| format!("{first_path} LIKE '%.{e}'"))
+            .collect::<Vec<_>>()
+            .join(" OR ")
     };
-    let mut stmt = match db.prepare(sql) {
+    let video_match = ext_matches(VIDEO_EXTS);
+    let office_match = ext_matches(OFFICE_EXTS);
+    let category_sql = format!(
+        "CASE
+             WHEN kind = 'text' THEN 'text'
+             WHEN kind = 'image' THEN 'image'
+             WHEN kind = 'file' AND ({video_match}) THEN 'video'
+             WHEN kind = 'file' AND ({office_match}) THEN 'office'
+             ELSE 'file'
+         END"
+    );
+    // 拼音列在入库时生成（中文转无声调全拼/首字母，其余字符小写），
+    // SQLite LIKE 对 ASCII 不区分大小写，大写输入也能命中。
+    let kw = keyword
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .map(|k| format!("%{k}%"));
+    let where_sql = if kw.is_some() {
+        "WHERE content LIKE ?1 OR pinyin_full LIKE ?1 OR pinyin_abbr LIKE ?1"
+    } else {
+        ""
+    };
+    let sql = format!(
+        "WITH matched AS (
+             SELECT id, kind, content, width, height, pinned, created_at,
+                    {category_sql} AS category
+             FROM clips
+             {where_sql}
+         ), ranked AS (
+             SELECT *,
+                    ROW_NUMBER() OVER (ORDER BY pinned DESC, created_at DESC) AS all_rank,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY category ORDER BY pinned DESC, created_at DESC
+                    ) AS category_rank
+             FROM matched
+         )
+         SELECT id, kind, content, width, height, pinned, created_at
+         FROM ranked
+         WHERE all_rank <= 500
+            OR (category = 'text' AND category_rank <= 500)
+            OR (category <> 'text' AND category_rank <= 100)
+         ORDER BY pinned DESC, created_at DESC"
+    );
+    let mut stmt = match db.prepare(&sql) {
         Ok(s) => s,
         Err(_) => return vec![],
     };
