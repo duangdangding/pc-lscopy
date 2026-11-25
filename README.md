@@ -110,6 +110,7 @@ src-tauri/
   src/main.rs       入口（仅调用 lib）
   capabilities/     Tauri 权限声明
   tauri.conf.json   窗口/打包配置（identifier: com.lsh.lscopy）
+  Info.plist        macOS 本地网络权限用途声明（同步 / 互传需要）
 relay-server/       自建中继服务器（M1 骨架）：WSS 接入、挑战-响应鉴权、分组转发，
                     Dockerfile / docker-compose.yml，scripts/smoke.ts 冒烟测试
 docs/relay-sync-design.md  中继 + 局域网双通道同步设计文档
@@ -140,6 +141,10 @@ cargo clippy           # lint
 - 版本号需同步修改 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 三处。
 - 推 `v*` tag 触发 `.github/workflows/release.yml`，Windows + macOS 并行构建，产物包含安装包、便携版、macOS dmg / app.tar.gz、updater 签名与 SHA-256 校验文件。
 - 配置统一保存在 `lscopy-config.json`（顶层 `app` + `lan` + `relay` 三键）。默认数据目录：Windows = exe 同目录（便携模式）；macOS = `~/Library/Application Support/com.lsh.lscopy`（更新会整体替换 .app，包内数据每次更新都会丢，故不放包内）。数据库 `lscopy.db` 同目录。自定义配置目录时，配置会额外镜像一份到默认数据目录，配置目录被抹掉（如 mac 更新替换 .app）后启动自动恢复。
+
+## 常见问题（macOS 局域网）
+
+若 Mac 能接收其他设备发来的内容，但主动同步或发送文件时立即报 `No route to host (os error 65)`，而 Mac 终端执行 `nc -vz -G 3 <对方IP> 8765` 却能成功，通常是 lscopy 未获得 macOS「本地网络」权限，而不是目标设备离线。安装包含 `NSLocalNetworkUsageDescription` 声明的新版后，首次访问局域网时应允许授权；已安装过旧版时，到「系统设置 → 隐私与安全性 → 本地网络」检查 lscopy 开关（可先关闭再打开），然后完全退出（⌘Q）并重新启动应用。
 
 ## 常见问题（macOS 粘贴）
 
