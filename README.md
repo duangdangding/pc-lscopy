@@ -111,6 +111,7 @@ src-tauri/
   capabilities/     Tauri 权限声明
   tauri.conf.json   窗口/打包配置（identifier: com.lsh.lscopy）
   Info.plist        macOS 本地网络权限用途声明（同步 / 互传需要）
+  Entitlements.plist  macOS 签名网络权限（出站连接 + 入站监听）
 relay-server/       自建中继服务器（M1 骨架）：WSS 接入、挑战-响应鉴权、分组转发，
                     Dockerfile / docker-compose.yml，scripts/smoke.ts 冒烟测试
 docs/relay-sync-design.md  中继 + 局域网双通道同步设计文档
@@ -144,7 +145,7 @@ cargo clippy           # lint
 
 ## 常见问题（macOS 局域网）
 
-若 Mac 能接收其他设备发来的内容，但主动同步或发送文件时立即报 `No route to host (os error 65)`，而 Mac 终端执行 `nc -vz -G 3 <对方IP> 8765` 却能成功，通常是 lscopy 未获得 macOS「本地网络」权限，而不是目标设备离线。安装包含 `NSLocalNetworkUsageDescription` 声明的新版后，首次访问局域网时应允许授权；已安装过旧版时，到「系统设置 → 隐私与安全性 → 本地网络」检查 lscopy 开关（可先关闭再打开），然后完全退出（⌘Q）并重新启动应用。
+若 Mac 能接收其他设备发来的内容，但主动同步、配对或发送文件时立即报 `No route to host (os error 65)`，而 Mac 终端执行 `nc -vz -G 3 <对方IP> 8765` 却能成功，通常是 lscopy 未获得 macOS「本地网络」权限，而不是目标设备离线。新版同时包含 `NSLocalNetworkUsageDescription` 用途声明和 `com.apple.security.network.client` / `server` 签名权限；首次访问局域网时应允许授权，然后完全退出（⌘Q）并重新启动应用。若直接运行 `/Applications/lscopy.app/Contents/MacOS/lscopy` 可以发送、正常启动却失败，即可确认是正常启动方式下的权限归属问题，应升级到包含完整签名权限的版本，而不是排查 Windows / 安卓接收端。
 
 ## 常见问题（macOS 粘贴）
 
