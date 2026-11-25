@@ -2,7 +2,7 @@
 
 lscopy 的发布流程（`.github/workflows/release.yml`）支持 Windows / macOS 数字签名与 SHA-256 校验。
 
-- **不配任何 secret**：正常构建并发布，产物不签名（与旧行为一致），仅额外产出 3 个 `sha256sums-*.txt` 校验文件。
+- **不配任何 secret**：正常构建并发布；macOS 使用 ad-hoc 签名以嵌入本地网络权限，Windows 产物不签名，另产出 3 个 `sha256sums-*.txt` 校验文件。
 - **配置 secret 后**：自动启用签名（macOS 含公证），无需改代码。
 
 secret 配置入口：GitHub 仓库 → **Settings → Secrets and variables → Actions → New repository secret**。

@@ -139,6 +139,7 @@ cargo clippy           # lint
 ## 打包与发布
 
 - 构建必须走 Tauri CLI（`bun run tauri build`），不要裸 `cargo build --release`。
+- macOS 默认使用 ad-hoc 签名（`bundle.macOS.signingIdentity = "-"`），确保未配置 Apple 证书时也会嵌入网络 entitlements；配置 Developer ID 后由 `APPLE_SIGNING_IDENTITY` 环境变量覆盖。
 - 版本号需同步修改 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 三处。
 - 推 `v*` tag 触发 `.github/workflows/release.yml`，Windows + macOS 并行构建，产物包含安装包、便携版、macOS dmg / app.tar.gz、updater 签名与 SHA-256 校验文件。
 - 配置统一保存在 `lscopy-config.json`（顶层 `app` + `lan` + `relay` 三键）。默认数据目录：Windows = exe 同目录（便携模式）；macOS = `~/Library/Application Support/com.lsh.lscopy`（更新会整体替换 .app，包内数据每次更新都会丢，故不放包内）。数据库 `lscopy.db` 同目录。自定义配置目录时，配置会额外镜像一份到默认数据目录，配置目录被抹掉（如 mac 更新替换 .app）后启动自动恢复。
